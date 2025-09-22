@@ -42,6 +42,11 @@ jobs:
           pip install -e .
 
       - name: Run all end-to-end tests
+        # Set the REDIS_HOST environment variable for this step.
+        # This tells the test scripts to connect to the 'redis' service
+        # container instead of 'localhost'.
+        env:
+          REDIS_HOST: redis
         run: |
           # Run each test script in sequence. If any one of them fails,
           # the entire job will fail.
