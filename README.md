@@ -89,6 +89,7 @@ Events are added to a Redis stream via `XADD`. Each entry contains a single fiel
   "timestamp": 1758517756,
   "raw": "lrh=[type=10680000 len=192 idx=520/36052] fid=[0x2000057b4:0x1d648:0x0] dfid=[0x2000057b4:0x1d648:0x0] compound/cookie=0x0/0x6913bb97 action=ARCHIVE archive#=1 flags=0x0 extent=0x0-0xffffffffffffffff gid=0x0 datalen=50 status=STARTED data=[7461673D6D]"
 }
+```
 
 ---
 
