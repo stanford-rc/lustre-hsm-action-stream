@@ -28,6 +28,11 @@ jobs:
         with:
           python-version: '3.9'
 
+      - name: Install Redis client tool
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y redis-tools
+
       - name: Install dependencies and project
         run: |
           python -m pip install --upgrade pip
