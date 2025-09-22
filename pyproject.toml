@@ -2,12 +2,38 @@
 requires = ["setuptools>=53.0"]
 build-backend = "setuptools.build_meta"
 
-# setup.cfg provides the metadata in a more backwards-compatible way (for now).
-
-# We still need to define the runtime dependencies here, as this is
-# where modern tools like 'pip' look for them.
-[tool.setuptools]
-install_requires = [
-    "PyYAML",
-    "redis"
+[project]
+name = "lustre-hsm-action-stream"
+version = "0.1.0"
+description = "A toolkit for shipping and reconciling Lustre HSM action events."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { file = "LICENSE" }
+authors = [
+  { name = "Stephane Thiell", email = "sthiell@stanford.edu" }
 ]
+classifiers = [
+    "License :: OSI Approved :: GNU General Public License v3 or later (GPLv3+)",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+]
+# This replaces the 'install_requires' section from the old pyproject.toml
+dependencies = [
+    "PyYAML",
+    "redis",
+]
+
+[project.urls]
+Homepage = "https://github.com/stanford-rc/lustre-hsm-action-stream"
+
+# This replaces the '[options.entry_points]' section from setup.cfg
+[project.scripts]
+hsm-action-shipper = "lustre_hsm_action_stream.shipper:main"
+hsm-stream-reconciler = "lustre_hsm_action_stream.reconciler:main"
+hsm-action-top = "lustre_hsm_action_stream.viewer:main"
+hsm-stream-janitor = "lustre_hsm_action_stream.janitor:main"
+
+# This section provides configuration for setuptools, replacing [options] from setup.cfg
+[tool.setuptools]
+# This tells setuptools that the packages are in the 'src' directory
+package-dir = {"" = "src"}
