@@ -17,7 +17,12 @@ jobs:
         image: redis:6
         # Options to wait for Redis to be healthy before starting the test steps.
         options: >-
-          --health-cmd "redis-cli ping" --health-interval 10s --health-timeout 5s --health-retries 5
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
 
     steps:
       - name: Checkout repository code
@@ -42,11 +47,6 @@ jobs:
           pip install -e .
 
       - name: Run all end-to-end tests
-        # Set the REDIS_HOST environment variable for this step.
-        # This tells the test scripts to connect to the 'redis' service
-        # container instead of 'localhost'.
-        env:
-          REDIS_HOST: redis
         run: |
           # Run each test script in sequence. If any one of them fails,
           # the entire job will fail.
