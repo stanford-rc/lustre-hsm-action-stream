@@ -34,13 +34,15 @@ redis_stream_name: "hsm:actions"
 log_level: "DEBUG"
 EOF
 
+# Use xdel_reaped: true in the test config to make verification easier
 cat > "$JANITOR_CONFIG_FILE" <<EOF
 redis_host: "$REDIS_HOST"
 redis_port: $REDIS_PORT
 redis_db: $REDIS_DB
 redis_stream_name: "hsm:actions"
 operation_interval_seconds: 1
-terminal_state_timeout_seconds: 2 # 2 seconds
+terminal_state_timeout_seconds: 2
+xdel_reaped: true
 log_level: "DEBUG"
 EOF
 
@@ -49,23 +51,25 @@ redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" FLUSHDB
 
 ACTION_A_STARTED="idx=[1/1] action=ARCHIVE fid=[0xa] status=STARTED"
 ACTION_B_STARTED="idx=[1/2] action=ARCHIVE fid=[0xb] status=STARTED"
-ACTION_C_STARTED="idx=[1/3] action=ARCHIVE fid=[0xc] status=WAITING"
+ACTION_C_WAITING="idx=[1/3] action=ARCHIVE fid=[0xc] status=WAITING"
 ACTION_B_SUCCEED="idx=[1/2] action=ARCHIVE fid=[0xb] status=SUCCEED"
 
-# 1. Populate Redis with initial state
+# 1. Populate stream with 3 NEW events.
 echo "--- TEST 1: Populating Redis stream ---"
 echo "$ACTION_A_STARTED" > "$ACTIONS_FILE"
 echo "$ACTION_B_STARTED" >> "$ACTIONS_FILE"
-echo "$ACTION_C_STARTED" >> "$ACTIONS_FILE"
+echo "$ACTION_C_WAITING" >> "$ACTIONS_FILE"
 PYTHONPATH=src python -m lustre_hsm_action_stream.shipper -c "$SHIPPER_CONFIG_FILE" --run-once
 
-# 2. Create a terminal state (B=SUCCEED) and a purged state (A is removed)
+# 2. Create a purged state (A is removed) and a terminal state (B -> SUCCEED).
 echo "--- TEST 2: Creating terminal and purged states ---"
 echo "$ACTION_B_SUCCEED" > "$ACTIONS_FILE"
-echo "$ACTION_C_STARTED" >> "$ACTIONS_FILE"
+echo "$ACTION_C_WAITING" >> "$ACTIONS_FILE" # C is unchanged
 PYTHONPATH=src python -m lustre_hsm_action_stream.shipper -c "$SHIPPER_CONFIG_FILE" --run-once
 
-# 3. Run the janitor once to establish its baseline 'last_seen' timestamps.
+# Stream now has 5 events: NEW A, NEW B, NEW C, PURGED A, UPDATE B
+
+# 3. Establish initial janitor state. It will see the SUCCEED state for B.
 echo "--- TEST 3: Initial janitor run to establish state ---"
 PYTHONPATH=src python -m lustre_hsm_action_stream.janitor -c "$JANITOR_CONFIG_FILE" --run-once
 
@@ -73,22 +77,23 @@ PYTHONPATH=src python -m lustre_hsm_action_stream.janitor -c "$JANITOR_CONFIG_FI
 echo "Waiting for stale timeout to pass..."
 sleep 3
 
-# 5. Run the janitor a SECOND time. This is the actual test run.
-echo "--- TEST 4: Running janitor again to reap stale action ---"
-# This run will see that action B's 'last_seen' timestamp is ~3 seconds ago,
-# which is greater than the 2-second timeout, triggering the reap.
+# 5. Run the janitor again. This is the main test.
+echo "--- TEST 4: Running janitor again to reap and trim ---"
 JANITOR_LOG=$(PYTHONPATH=src python -m lustre_hsm_action_stream.janitor -c "$JANITOR_CONFIG_FILE" --run-once 2>&1)
 
 # 6. Verify the results.
 echo "--- TEST 5: Verifying results ---"
-# Check the log for the "Reaping" message, confirming the timeout logic worked.
-# This is a much cleaner way to check the log content.
+echo "$JANITOR_LOG"
+
+# Check that the reaping message was logged.
 echo "$JANITOR_LOG" | grep "Reaping stale terminal action"
 
-# Check the Redis stream length. It should be small, as events for A and B are now obsolete.
+# The final stream length should be exactly 2.
+# The remaining events are `NEW C` and `PURGED A`.
+# `NEW A` and `NEW B` were trimmed. `UPDATE B` was XDEL'd.
 STREAM_LEN=$(redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" XLEN hsm:actions)
-if [ "$STREAM_LEN" -gt 2 ]; then
-    echo "ERROR: Stream was not trimmed correctly! Length is $STREAM_LEN"
+if [ "$STREAM_LEN" -ne 2 ]; then
+    echo "ERROR: Stream was not trimmed correctly! Expected length 2, but got $STREAM_LEN"
     exit 1
 fi
 

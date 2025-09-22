@@ -35,6 +35,8 @@ def load_config(path):
         for key in required_keys:
             if key not in conf:
                 raise KeyError(f"Required configuration key '{key}' not found in {path}")
+        # Optional: xdel_reaped can be set in YAML, default to False
+        conf['xdel_reaped'] = conf.get('xdel_reaped', False)
         return conf
     except Exception as e:
         print(f"FATAL: Could not load or validate config {path}: {e}", file=sys.stderr)
@@ -45,8 +47,9 @@ class Janitor:
     """
     Manages the state and lifecycle of the stream janitor daemon.
 
-    This class encapsulates all state (like the set of live actions) and
-    logic, avoiding global variables and improving thread safety.
+    - Tracks all live HSM actions (keyed by (mdt, cat_idx, rec_idx)).
+    - When a terminal state (SUCCEED/FAILED) is reached, records the timestamp embedded in the Redis event ID.
+    - If a terminal state action's age exceeds terminal_state_timeout_seconds, it is reaped as a zombie.
     """
     def __init__(self, conf, dry_run=False):
         self.conf = conf
@@ -54,8 +57,8 @@ class Janitor:
         
         # This dictionary is the core of the janitor's state. It tracks all
         # actions believed to be "live" in the Lustre HSM system.
-        # Key: (mdt, cat_idx, rec_idx) tuple
-        # Value: {'id': str, 'status': str, 'last_seen': float} dictionary
+        # Key: (mdt, cat_idx, rec_idx)
+        # Value: {'id': str, 'status': str, 'terminal_ts': float | None}
         self.live_actions = {}
         
         # A lock to protect access to the 'live_actions' dictionary from
@@ -85,42 +88,55 @@ class Janitor:
         try:
             # XINFO STREAM provides metadata about the stream, including the last ID.
             info = self.redis_client.xinfo_stream(self.conf['redis_stream_name'])
-            return info.get('last-generated-id', b'0-0').decode()
-        except redis.exceptions.ResponseError: # Stream does not exist yet.
+            lastid = info.get("last-generated-id", b'0-0')
+            if isinstance(lastid, bytes):
+                lastid = lastid.decode()
+            return lastid
+        except redis.exceptions.ResponseError:
             logging.info("Stream does not exist yet. Starting from the beginning.")
             return '0-0'
         except Exception as e:
             logging.warning(f"Could not get stream tail ID, will start from beginning. Error: {e}")
             return '0-0'
 
+    def _id_to_timestamp(self, redis_id):
+        """Converts a Redis stream ID string to a unix timestamp (seconds)."""
+        try:
+            # The part before the '-' is milliseconds since epoch.
+            return int(redis_id.split('-')[0]) / 1000.0
+        except Exception:
+            return 0.0
+
     def _process_one_event(self, msg_id, event_data):
         """Updates the internal 'live_actions' state based on a single event."""
         try:
             event = json.loads(event_data[b'data'])
             key = (event['mdt'], event['cat_idx'], event['rec_idx'])
-            msg_id_str = msg_id.decode()
+            msg_id_str = msg_id.decode() if isinstance(msg_id, bytes) else str(msg_id)
+            new_status = event.get('status')
 
             if event['event_type'] in ("NEW", "UPDATE"):
                 existing_action = self.live_actions.get(key)
-                new_status = event.get('status')
-
-                # Only update the 'last_seen' timestamp if the action is brand new
-                # or if its status is actually changing.
-                if not existing_action or existing_action.get('status') != new_status:
+                if not existing_action:
+                    # New action.
                     self.live_actions[key] = {
                         'id': msg_id_str,
                         'status': new_status,
-                        'last_seen': time.time()
+                        'terminal_ts': self._id_to_timestamp(msg_id_str) if new_status in ('SUCCEED', 'FAILED') else None
                     }
+                elif existing_action.get('status') != new_status:
+                    # Status changed.
+                    existing_action['id'] = msg_id_str
+                    existing_action['status'] = new_status
+                    if new_status in ('SUCCEED', 'FAILED'):
+                        existing_action['terminal_ts'] = self._id_to_timestamp(msg_id_str)
+                    else:
+                        existing_action['terminal_ts'] = None
                 else:
-                    # If we are just re-processing an old event during bootstrap,
-                    # only update the event ID. DO NOT change 'last_seen'.
-                    # This preserves the original time the action entered its terminal state.
-                    self.live_actions[key]['id'] = msg_id_str
-
+                    # Same status update, just a new event ID. Don't reset terminal_ts!
+                    existing_action['id'] = msg_id_str
             elif event['event_type'] == "PURGED":
                 self.live_actions.pop(key, None)
-            
             return msg_id_str
         except (json.JSONDecodeError, KeyError) as e:
             logging.warning(f"Could not parse event, skipping. Error: {e}. Raw: {event_data}")
@@ -129,7 +145,7 @@ class Janitor:
     def event_consumer_loop(self):
         """
         A background thread that consumes events from Redis to maintain the
-        'live_actions' state dictionary. It runs continuously.
+        'live_actions' state dictionary. Includes bootstrap phase and tail mode.
         """
         logging.info("Redis consumer thread started.")
         while True:
@@ -140,11 +156,11 @@ class Janitor:
 
                 stream_name = self.conf['redis_stream_name']
                 tail_id = self._get_stream_tail_id()
-                logging.info(f"Bootstrap mode: replaying stream up to approx. tail ID: {tail_id}")
+                logging.info(f"Bootstrap mode: Will replay stream up to tail ID: {tail_id}")
                 last_id = '0-0'
                 events_in_bootstrap = 0
 
-                # --- Bootstrap Phase: Replay history as fast as possible ---
+                # --- Bootstrap Phase ---
                 while True:
                     # Read without blocking to consume quickly.
                     response = self.redis_client.xread({stream_name: last_id}, count=10000)
@@ -185,8 +201,8 @@ class Janitor:
 
     def janitor_task(self, run_once=False):
         """
-        The main periodic task. It waits for bootstrap, then enters a loop to
-        analyze the live action set and trim the Redis stream accordingly.
+        Periodic task: reaps stale terminal actions and trims Redis stream.
+        - Stale terminal is defined by terminal_state_timeout_seconds (default: 300s).
         """
         logging.info("Waiting for initial bootstrap from Redis stream...")
         self.is_bootstrapped.wait()
@@ -202,19 +218,35 @@ class Janitor:
                 # from halting indefinitely.
                 timeout = self.conf.get('terminal_state_timeout_seconds', 300)
                 now = time.time()
-                reaped_keys = []
+                reaped = []
                 with self.state_lock:
-                    for key, action_data in self.live_actions.items():
-                        if action_data.get('status') in ('SUCCEED', 'FAILED'):
-                            if (now - action_data.get('last_seen', now)) > timeout:
+                    for key, action in list(self.live_actions.items()):
+                        if action.get('status') in ('SUCCEED', 'FAILED'):
+                            tts = action.get('terminal_ts')
+                            if tts is not None and (now - tts) > timeout:
                                 logging.warning(
-                                    f"Reaping stale terminal action {key} (status: {action_data['status']}) "
+                                    f"Reaping stale terminal action {key} (status: {action['status']}) "
                                     f"due to timeout ({timeout}s). The PURGED event was likely missed."
                                 )
-                                reaped_keys.append(key)
-                    # Safely remove the reaped keys outside the iteration
-                    for key in reaped_keys:
+                                reaped.append((key, action))
+                    for key, action in reaped:
                         self.live_actions.pop(key)
+                        # Explicit XDEL if requested:
+                        if self.conf.get('xdel_reaped', False) and not self.dry_run:
+                            id_to_remove = action.get('id')
+                            if id_to_remove:
+                                try:
+                                    r_trim = redis.Redis(
+                                        host=self.conf['redis_host'],
+                                        port=self.conf['redis_port'],
+                                        db=self.conf['redis_db']
+                                    )
+                                    r_trim.xdel(self.conf['redis_stream_name'], id_to_remove)
+                                    logging.info(f"Explicitly XDEL zombie event {id_to_remove} due to reaping.")
+                                except Exception as e:
+                                    logging.error(f"Failed to XDEL zombie entry {id_to_remove}: {e}")
+                if reaped:
+                    logging.info(f"Reaped {len(reaped)} stale terminal actions this cycle.")
 
                 # --- TRIMMING LOGIC ---
                 with self.state_lock:
@@ -241,7 +273,8 @@ class Janitor:
                             # Use a new connection for the blocking trim command to avoid interfering with the consumer.
                             r_trim = redis.Redis(host=self.conf['redis_host'], port=self.conf['redis_port'], db=self.conf['redis_db'])
                             # XTRIM with MINID is the command to garbage collect the stream.
-                            deleted_count = r_trim.xtrim(self.conf['redis_stream_name'], minid=oldest_referenced_id)
+                            deleted_count = r_trim.xtrim(self.conf['redis_stream_name'], minid=oldest_referenced_id,
+                                                         approximate=(not self.conf.get('xdel_reaped')))
                             logging.info(f"Successfully trimmed {deleted_count:,} old entries from the stream.")
                         except Exception as e:
                             logging.error(f"Failed to trim stream: {e}")
@@ -256,7 +289,7 @@ class Janitor:
             time.sleep(self.conf['operation_interval_seconds'])
 
 def main():
-    """Main entry point for the hsm-stream-janitor executable."""
+    """Main entry point for hsm-stream-janitor."""
     parser = argparse.ArgumentParser(
         description="A state-driven garbage collector for the Lustre HSM Redis stream.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
@@ -265,10 +298,15 @@ def main():
     parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], help="Override the log level from the config file.")
     parser.add_argument("--dry-run", action="store_true", help="Simulate trimming without deleting any data from Redis.")
     parser.add_argument("--run-once", action="store_true", help="Perform one cleanup cycle and exit. For testing.")
+    parser.add_argument("--xdel-reaped", action="store_true",
+                        help="If set, issue XDEL for zombie (self-reaped) events. Useful for testing strict event cleanup.")
     args = parser.parse_args()
     
     conf = load_config(args.config)
-    
+
+    if args.xdel_reaped:
+        conf['xdel_reaped'] = True
+
     log_level = args.log_level or conf.get("log_level", "INFO").upper()
     logging.basicConfig(level=log_level, format="%(asctime)s %(levelname)s:%(name)s:%(threadName)s:%(message)s")
     
