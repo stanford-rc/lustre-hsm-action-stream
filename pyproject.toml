@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=53.0"]
+build-backend = "setuptools.build_meta"
+
+# setup.cfg provides the metadata in a more backwards-compatible way (for now).
+
+# We still need to define the runtime dependencies here, as this is
+# where modern tools like 'pip' look for them.
+[tool.setuptools]
+install_requires = [
+    "PyYAML",
+    "redis"
+]

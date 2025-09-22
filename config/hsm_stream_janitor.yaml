@@ -1,0 +1,24 @@
+#
+# Configuration for the hsm-stream-janitor service.
+#
+
+# --- Redis Connection (REQUIRED) ---
+# These details MUST match the shipper's configuration.
+redis_host: "localhost"
+redis_port: 6379
+redis_db: 1
+redis_stream_name: "hsm:actions"
+
+# --- Operation Interval ---
+# How often the janitor will analyze the stream and perform a cleanup, in seconds.
+operation_interval_seconds: 120
+
+# --- Self-Healing Timeout (Recommended) ---
+# How long to wait before forcefully removing an action that is in a 'SUCCEED'
+# or 'FAILED' state but for which no 'PURGED' event was received.
+# This prevents 'zombie' actions from halting garbage collection indefinitely.
+# This value should be safely longer than Lustre's 'hsm/grace_delay' (60s).
+terminal_state_timeout_seconds: 600 # 10 minutes
+
+# --- Logging ---
+log_level: "INFO"

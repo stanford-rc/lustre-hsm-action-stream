@@ -1,0 +1,16 @@
+[Unit]
+Description=Lustre HSM Action Event Shipper
+After=network-online.target redis.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+# Updated path to /usr/sbin
+ExecStart=/usr/sbin/hsm-action-shipper -c /etc/lustre-hsm-action-stream/hsm_action_shipper.yaml
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

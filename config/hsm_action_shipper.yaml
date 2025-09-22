@@ -1,0 +1,43 @@
+#
+# Configuration for the hsm-action-shipper service.
+#
+
+# --- 1. Redis Connection (REQUIRED) ---
+# You MUST edit 'redis_host' to point to your Redis server.
+redis_host: "localhost"
+redis_port: 6379
+
+# The Redis database number to use. This must be an integer within the
+# range configured on your Redis server (default is 0-15).
+# Ensure this database is not used by another application.
+redis_db: 1
+
+# The name of the Redis Stream where events will be published.
+# It is strongly recommended to keep this default name, as all other tools
+# in this suite (reconciler, viewer) are configured to use it by default.
+redis_stream_name: "hsm:actions"
+
+# --- 2. Filesystem Polling ---
+# This default glob will automatically find any Lustre filesystem on the MDS.
+# For clarity, or to limit the scope in a multi-filesystem environment, it is
+# recommended to replace the wildcard '*' with your specific fsname.
+# e.g., "/sys/kernel/debug/lustre/mdt/elm-MDT*/hsm/actions"
+mdt_watch_glob: "/sys/kernel/debug/lustre/mdt/*-MDT*/hsm/actions"
+
+# How often to poll the actions files, in seconds.
+#
+# IMPORTANT: To reliably capture the final status of an action before it is
+# purged, the polling rate must be fast enough. Lustre keeps completed actions
+# visible for 'hsm/grace_delay' seconds (default: 60s).
+#
+# Following the Nyquist sampling principle, to guarantee you capture this
+# state, you must sample at a rate more than twice the signal's frequency.
+# Therefore, poll_interval should be less than half of hsm/grace_delay.
+poll_interval: 20
+
+# --- 3. Cache and Logging ---
+# The file to store the shipper's persistent action cache.
+cache_path: "/var/cache/hsm-action-shipper/cache.json"
+
+# Log level can be DEBUG, INFO, WARNING, ERROR, CRITICAL.
+log_level: "INFO"
