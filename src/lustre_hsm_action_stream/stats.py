@@ -6,164 +6,165 @@
 """
 hsm-stream-stats
 
-A stateless metrics collector for the Lustre HSM action stream. It replays the
-stream to generate an accurate snapshot of the current state, and outputs the
-result as a JSON object, ideal for Telegraf's json_v2 parser.
+A stateless metrics collector for the Lustre HSM action stream. It replays
+all discovered hsm:actions:* streams to generate a snapshot of the current
+state, and outputs the result as a JSON object to stdout.
 """
 
 import sys
 import yaml
 import json
 import logging
-import redis
 import time
 import argparse
 from collections import Counter
+import redis
+
+# Import the new high-level consumer API
+from .consumer import StreamReader
 
 class StatsGenerator:
-    """Calculates and prints metrics by replaying the HSM action stream."""
+    """Calculates and prints metrics by replaying all HSM action streams."""
     def __init__(self, conf):
         self.conf = conf
         self.live_actions = {}
+        self.events_processed = 0
 
-    def _id_to_timestamp(self, redis_id):
+    def _id_to_timestamp(self, redis_id_str):
         """Converts a Redis stream ID string to a unix timestamp (float seconds)."""
         try:
-            return int(redis_id.split('-')[0]) / 1000.0
+            return int(redis_id_str.split('-')[0]) / 1000.0
         except (ValueError, IndexError):
             return 0.0
 
-    def _process_one_event(self, msg_id, event_data):
+    def _process_one_event(self, event_id, event_data):
         """Updates the in-memory 'live_actions' dictionary based on a single event."""
-        try:
-            event = json.loads(event_data[b'data'])
-            key = (event['mdt'], event['cat_idx'], event['rec_idx'])
-            
-            if event['event_type'] in ("NEW", "UPDATE"):
-                # Store the necessary attributes for later aggregation.
-                self.live_actions[key] = {
-                    'id': msg_id.decode(),
-                    'mdt': event.get('mdt'),
-                    'action': event.get('action'),
-                    'status': event.get('status')
+        key = (event_data['mdt'], event_data['cat_idx'], event_data['rec_idx'])
+
+        if event_data['event_type'] in ("NEW", "UPDATE"):
+            self.live_actions[key] = {
+                'id': event_id,
+                'mdt': event_data.get('mdt'),
+                'action': event_data.get('action'),
+                'status': event_data.get('status')
+            }
+        elif event_data['event_type'] == "PURGED":
+            self.live_actions.pop(key, None)
+
+    def _get_stream_health_metrics(self, r, stream_names):
+        """Gets length and age metrics for a list of streams."""
+        health_metrics = {'total_stream_entries': 0, 'streams': {}}
+        now = time.time()
+        for name in stream_names:
+            try:
+                length = r.xlen(name)
+                health_metrics['total_stream_entries'] += length
+                info = r.xinfo_stream(name)
+                first = info.get('first-entry')
+                last_id = info.get('last-generated-id')
+                age, newest_age = 0, 0
+                if first and last_id:
+                    age = int(self._id_to_timestamp(last_id.decode()) - self._id_to_timestamp(first[0].decode()))
+                    newest_age = int(now - self._id_to_timestamp(last_id.decode()))
+
+                health_metrics['streams'][name] = {
+                    'length': length,
+                    'age_seconds': age,
+                    'newest_entry_age_seconds': newest_age
                 }
-            elif event['event_type'] == "PURGED":
-                self.live_actions.pop(key, None)
-        except (json.JSONDecodeError, KeyError) as e:
-            logging.warning(f"Could not parse event {msg_id.decode()}, skipping. Error: {e}")
+            except redis.exceptions.ResponseError:
+                logging.warning(f"Stream '{name}' disappeared during health check.")
+            except Exception as e:
+                logging.warning(f"Could not get health for stream '{name}': {e}")
+        return health_metrics
 
     def run(self):
-        """Main execution flow: connect, replay stream, calculate, print."""
-        logging.info("Performing a full stream replay for maximum accuracy.")
+        """Main execution flow: connect, replay streams, calculate, print JSON."""
+        logging.info("Starting a full stream replay for metrics generation.")
 
-        try:
-            r = redis.Redis(
-                host=self.conf['redis_host'], port=self.conf['redis_port'], db=self.conf['redis_db'],
-                socket_connect_timeout=5, decode_responses=False
-            )
-            r.ping()
-        except Exception as e:
-            logging.error(f"Could not connect to Redis: {e}")
-            return
-
-        stream_name = self.conf['redis_stream_name']
-        
-        # --- NEW: Get stream boundary metrics directly from Redis ---
-        stream_total_age_seconds = 0
-        newest_entry_age_seconds = 0
-        try:
-            stream_info = r.xinfo_stream(stream_name)
-            first_id_bytes = stream_info.get('first-entry', [None, None])[0]
-            last_id_bytes = stream_info.get('last-generated-id')
-
-            if first_id_bytes and last_id_bytes:
-                first_ts = self._id_to_timestamp(first_id_bytes.decode())
-                last_ts = self._id_to_timestamp(last_id_bytes.decode())
-                stream_total_age_seconds = int(last_ts - first_ts)
-                newest_entry_age_seconds = int(time.time() - last_ts)
-        except redis.exceptions.ResponseError: # Stream empty/doesn't exist
-            pass
-        except Exception as e:
-            logging.warning(f"Could not retrieve stream boundary metrics: {e}")
-
-        # --- Replay stream to build live state ---
-        events_processed = 0
-        last_id = '0-0'
-        while True:
-            # Read in large chunks for efficiency.
-            response = r.xread({stream_name: last_id}, count=10000)
-            if not response:
-                break
-            for _, messages in response:
-                for msg_id, event_data in messages:
-                    events_processed += 1
-                    self._process_one_event(msg_id, event_data)
-                    last_id = msg_id.decode()
-        
-        logging.info(f"Processed {events_processed} events, found {len(self.live_actions)} live actions.")
-
-        # --- Aggregate live action breakdowns ---
-        breakdown_counter = Counter(
-            (v.get('mdt'), v.get('action'), v.get('status'))
-            for v in self.live_actions.values()
+        # The StreamReader handles connection and discovery internally.
+        reader = StreamReader(
+            host=self.conf['redis_host'],
+            port=self.conf['redis_port'],
+            db=self.conf['redis_db'],
+            prefix=self.conf['redis_stream_prefix']
         )
-        # Convert the counter into a flat list of dictionaries, which is an
-        # ideal format for Telegraf's json_v2 parser to iterate over.
-        breakdown_list = []
-        for (mdt, action, status), count in breakdown_counter.items():
-            breakdown_list.append({
-                "mdt": mdt or "unknown",
-                "action": action or "unknown",
-                "status": status or "unknown",
-                "count": count
-            })
 
-        # --- Calculate oldest live action age ---
+        # --- Replay ALL streams to build global live state ---
+        logging.info(f"Discovering and replaying streams with prefix '{self.conf['redis_stream_prefix']}:*'.")
+        
+        # Use a small block_ms. The generator yields None when history is done.
+        for event in reader.events(from_beginning=True, block_ms=500):
+            if not event:
+                # No more historical events, replay is complete.
+                break
+            try:
+                self._process_one_event(event.id, event.data)
+                self.events_processed += 1
+            except (KeyError, TypeError) as e:
+                logging.warning(f"Could not parse event {event.id}, skipping. Error: {e}")
+
+        logging.info(f"Replay complete. Processed {self.events_processed:,} events, found {len(self.live_actions):,} live actions.")
+
+        # --- Get stream health metrics (requires a separate, direct Redis connection) ---
+        health_metrics = {}
+        if reader.streams:
+            try:
+                direct_r = redis.Redis(host=self.conf['redis_host'], port=self.conf['redis_port'], db=self.conf['redis_db'])
+                health_metrics = self._get_stream_health_metrics(direct_r, reader.streams)
+            except Exception as e:
+                logging.error(f"Could not connect to Redis for health metrics: {e}")
+
+        # --- Calculate summary metrics ---
+        breakdown_counter = Counter((v.get('mdt'), v.get('action'), v.get('status')) for v in self.live_actions.values())
+        breakdown_list = [{"mdt": m or 'N/A', "action": a or 'N/A', "status": s or 'N/A', "count": c} 
+                          for (m, a, s), c in sorted(breakdown_counter.items())]
+
         oldest_live_action_age_seconds = 0
         if self.live_actions:
             oldest_id = min(v['id'] for v in self.live_actions.values())
             oldest_ts = self._id_to_timestamp(oldest_id)
             if oldest_ts > 0:
                 oldest_live_action_age_seconds = int(time.time() - oldest_ts)
-        
-        # --- Prepare Final JSON Output ---
+
         summary_metrics = {
-            # Gauges for the current state
             "total_live_actions": len(self.live_actions),
             "oldest_live_action_age_seconds": oldest_live_action_age_seconds,
-            
-            # Gauges for the stream's health
-            "stream_total_age_seconds": stream_total_age_seconds,
-            "newest_entry_age_seconds": newest_entry_age_seconds,
+            "total_events_replayed": self.events_processed,
+            **health_metrics
+        }
 
-            # Internal metric for this run
-            "events_processed_in_run": events_processed
-        }
-        
-        final_output = {
-            "summary": summary_metrics,
-            "breakdown": breakdown_list
-        }
-        
-        json.dump(final_output, sys.stdout)
+        final_output = {"summary": summary_metrics, "breakdown": breakdown_list}
+        json.dump(final_output, sys.stdout, indent=2)
+
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="A stateless metrics collector for the HSM action stream.",
-        formatter_class=argparse.ArgumentDefaultsHelpFormatter
-    )
-    parser.add_argument("-c", "--config", default="/etc/lustre-hsm-action-stream/hsm_stream_stats.yaml", help="Path to YAML config file.")
-    parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING", "ERROR"], default="INFO")
+    parser = argparse.ArgumentParser(description="A stateless metrics collector for the HSM action stream.")
+    parser.add_argument("-c", "--config", default="/etc/lustre-hsm-action-stream/hsm_stream_stats.yaml", help="Path to config file.")
+    parser.add_argument("--log-level", default="WARNING", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], help="Set the logging level for stderr output.")
+    parser.add_argument("--log-file", help="Redirect logging output to a file instead of stderr.")
     args = parser.parse_args()
+
+    # --- Configure logging to go to stderr by default ---
+    log_kwargs = {
+        "level": args.log_level.upper(),
+        "format": "%(asctime)s %(levelname)s:%(name)s:%(message)s",
+    }
+    if args.log_file:
+        log_kwargs["filename"] = args.log_file
+    else:
+        log_kwargs["stream"] = sys.stderr
+
+    logging.basicConfig(**log_kwargs)
 
     try:
         with open(args.config) as f:
             conf = yaml.safe_load(f)
+        if 'redis_stream_prefix' not in conf:
+            raise KeyError("Config must contain 'redis_stream_prefix'")
     except Exception as e:
-        print(f"FATAL: Could not load config {args.config}: {e}", file=sys.stderr)
+        logging.critical(f"Could not load or validate config {args.config}: {e}")
         sys.exit(1)
-
-    logging.basicConfig(level=args.log_level.upper(), format="%(asctime)s %(levelname)s:%(name)s:%(message)s", stream=sys.stderr)
 
     stats_generator = StatsGenerator(conf)
     stats_generator.run()

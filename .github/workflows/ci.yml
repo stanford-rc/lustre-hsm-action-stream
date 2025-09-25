@@ -1,4 +1,4 @@
-name: lustre-hsm-action-stream tests
+name: Lustre HSM Action Stream CI
 
 on:
   push:
@@ -33,28 +33,22 @@ jobs:
         with:
           python-version: '3.9'
 
-      - name: Install Redis client tool
+      - name: Install system dependencies (Redis client)
         run: |
           sudo apt-get update
-          sudo apt-get install -y redis-tools
 
-      - name: Install dependencies and project
+      - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
-          # 'pip install -e .' installs the project in "editable" mode.
-          # This runs the setup logic from pyproject.toml and setup.cfg,
-          # installs dependencies, and makes the scripts available on the PATH.
+          # Install the project and its runtime dependencies (PyYAML, redis)
           pip install -e .
+          # Install the dependencies required for testing
+          pip install pytest pytest-cov
 
-      - name: Run all end-to-end tests
+      - name: Run Pytest suite with code coverage
         run: |
-          # Run each test script in sequence. If any one of them fails,
-          # the entire job will fail.
-          echo "--- Running Shipper/Reconciler Test ---"
-          ./tests/run_shipper_test.sh
-
-          echo "--- Running Viewer Smoke Test ---"
-          ./tests/run_viewer_test.sh
-
-          echo "--- Running Janitor Self-Healing Test ---"
-          ./tests/run_janitor_test.sh
+          # This single command runs our entire, unified pytest suite.
+          # - PYTHONPATH=src is needed so Python can find the application modules.
+          # - -v provides verbose output, showing each test that runs.
+          # - --cov generates a code coverage report for our application package.
+          PYTHONPATH=src pytest -v --cov=lustre_hsm_action_stream --cov-report=term-missing

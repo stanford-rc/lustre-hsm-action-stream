@@ -2,214 +2,220 @@
 
 [![License](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
-A lightweight toolkit for shipping Lustre HSM events from MDT `hsm/actions` logs to a Redis stream, with tools for monitoring, metrics, and stream management.
+A high-performance, scalable, and operationally simple toolkit for creating a real-time event stream from Lustre's Hierarchical Storage Management (HSM) actions.
+
+This suite provides a self-healing producer daemon that runs on each Lustre Metadata Server (MDS) and a collection of consumer utilities for monitoring, metrics, and integrity auditing of Lustre/HSM actions. It is designed to give administrators and developers a persistent, reliable, and easily consumable view of all HSM activity across a Lustre file system.
+
+## Quick Overview for Lustre Administrators
+
+If you manage a Lustre filesystem with an HSM backend, you know that understanding what the HSM coordinator is doing can be challenging. The primary interface, `/sys/kernel/debug/lustre/mdt/*/hsm/actions`, is volatile and difficult to monitor across multiple servers.
+
+This toolkit solves that problem by providing:
+*   **A Centralized View:** A single Redis instance becomes the central broker for all HSM events (`archive`, `restore`, `remove`) from all MDTs.
+*   **Live Monitoring:** Use `hsm-action-top` for a live `top`-like dashboard of HSM activity or `hsm-stream-tail` to see a real-time log of events with file paths across all MDTs.
+*   **Metrics**: The streams maintain the full event history required to reconstruct the state of all currently live actions. Use the stateless `hsm-stream-stats` tool to generate a point-in-time JSON report by replaying this history, ideal for integration with monitoring systems like Telegraf and Grafana.
+*   **Operational Simplicity:** The core `hsm-action-shipper` daemon is self-healing and self-managing. It automatically handles MDT failovers and performs its own garbage collection, requiring minimal administrative overhead.
+*   **Extensibility:** A simple Python API allows you to easily build custom consumers to trigger workflows based on HSM events.
+
+## Examples of Consumer Tools
+
+#### `hsm-action-top`: The Live Dashboard
+A `top`-like terminal dashboard for real-time monitoring of HSM activity.
+```
+--- Lustre HSM Action Dashboard ---
+Time: 2025-10-02 10:30:15 | Redis: Connected
+Viewer Status: Listening for live updates...
+Live Actions: 351,204 | Total Events Processed: 750,112 | Last Event: 0s ago
+
+--- Live Action Count by (MDT, Action, Status) ---
+MDT         | ACTION  | STATUS     |      COUNT DIFF
+----------------------------------------------------------
+elm-MDT0000 | ARCHIVE | STARTED    |     50,000 
+elm-MDT0000 | ARCHIVE | WAITING    |     25,000 
+elm-MDT0001 | RESTORE | STARTED    |        125 (+5)
+elm-MDT0002 | ARCHIVE | STARTED    |    140,000 
+elm-MDT0002 | ARCHIVE | SUCCEED    |        210 (-15)
+elm-MDT0002 | ARCHIVE | WAITING    |     85,869 
+elm-MDT0003 | REMOVE  | FAILED     |          2 (+2)
+```
+
+#### `hsm-stream-tail`: The Real-Time Log
+A `tail -f` for your HSM actions, resolving file paths for easy identification.
+```bash
+$ hsm-stream-tail
+```
+```
+Tailing streams with prefix 'hsm:actions:*'. Press Ctrl+C to exit.
+...
+2025-10-02 10:32:05 [elm-MDT0001] RESTORE  STARTED  -> /lustre/project/data/simulation_run_42/output.dat (id: 1759453925123-0)
+2025-10-02 10:32:07 [elm-MDT0002] ARCHIVE  SUCCEED  -> /lustre/project/data/raw/microscope_img_22.tiff (id: 1759453927456-5)
+2025-10-02 10:32:08 [elm-MDT0001] RESTORE  SUCCEED  -> /lustre/project/data/simulation_run_42/output.dat (id: 1759453925123-1)
+```
+
+#### `hsm-stream-stats`: The Metrics Collector
+Generates a point-in-time JSON report, perfect for ingestion by monitoring tools.
+```bash
+$ hsm-stream-stats
+```
+```json
+{
+  "summary": {
+    "total_live_actions": 351204,
+    "oldest_live_action_age_seconds": 4500,
+    "total_events_replayed": 750112,
+    "total_stream_entries": 480550,
+    "streams": {
+      "hsm:actions:elm-MDT0000": { "length": 150000, ... },
+      "hsm:actions:elm-MDT0001": { "length": 550, ... }
+    }
+  },
+  "breakdown": [
+    { "mdt": "elm-MDT0000", "action": "ARCHIVE", "status": "STARTED", "count": 50000 },
+    { "mdt": "elm-MDT0001", "action": "RESTORE", "status": "STARTED", "count": 125 }
+  ]
+}
+```
 
 ---
 
-## System Architecture
+## Design and Technical Features
 
-The `lustre-hsm-action-stream` suite consists of several components that work together to provide a real-time, persistent, and manageable event stream for Lustre HSM actions. The centralized stream is designed to be consumed by the provided utilities and by any number of custom clients to trigger external actions and automated workflows.
+### System Architecture
 
-The diagram below illustrates the data flow and the role of each component:
+The architecture is designed for scalability, robustness, and operational simplicity. The core principle is to create a separate, self-contained Redis stream for each Lustre MDT. This logical partitioning simplifies consumers and isolates data streams from one another.
+
+The `hsm-action-shipper` daemon, running on each MDS, is a fully autonomous agent responsible for both producing events and maintaining the long-term health of the streams it owns.
 
 ```mermaid
 graph LR
-    subgraph "Source of Truth"
-        LustreMDS["Lustre MDS<br/>(/sys/.../hsm/actions)"]
+    subgraph "Source of Truth (on MDS)"
+        LustreMDS["Lustre MDS<br/>/sys/.../hsm/actions"]
     end
 
-    subgraph "Core Daemons"
-        Shipper["<b>hsm-action-shipper</b><br/>(Producer Daemon)"]
-        Janitor["<b>hsm-stream-janitor</b><br/>(Garbage Collector Daemon)"]
+    subgraph "Core Daemon (on MDS)"
+        Shipper["<b>hsm-action-shipper</b><br/>(Self-Healing Producer)"]
     end
 
-    subgraph "Central Broker"
+    subgraph "Central Broker (Redis)"
         style Redis fill:#f9f,stroke:#333,stroke-width:2px
-        Redis[("Redis Stream<br/>(hsm:actions)")]
+        subgraph "Per-MDT Streams"
+            Stream1["hsm:actions:fs1-MDT0000"]
+            Stream2["hsm:actions:fs1-MDT0001"]
+            StreamN["..."]
+        end
+        Redis[("Redis")]
     end
 
     subgraph "Utilities & Consumers"
         style User fill:#ccf,stroke:#333,stroke-width:2px
         style Metrics fill:#cfc,stroke:#333,stroke-width:2px
-        Reconciler["<b>hsm-stream-reconciler</b><br/>(Auditor)"]
-        Viewer["<b>hsm-action-top</b><br/>(Live Viewer)"]
-        Stats["<b>hsm-stream-stats</b><br/>(Metrics Collector)"]
-        CustomConsumers["<b>Custom Consumers</b><br/>(e.g., FID resolver,<br/>path-based actions)"]
+        Tail["<b>hsm-stream-tail</b>"]
+        Top["<b>hsm-action-top</b>"]
+        Stats["<b>hsm-stream-stats</b>"]
+        Reconciler["<b>hsm-stream-reconciler</b>"]
+        CustomConsumers["<b>Custom Consumers</b>"]
         User["Operator / User"]
-        Metrics["Metrics System<br/>(e.g., Telegraf/InfluxDB)"]
+        Metrics["Metrics System<br/>(e.g., Telegraf/Grafana)"]
     end
 
-    %% Data Flows
-    LustreMDS      -- "Polls Files"                --> Shipper
-    Shipper        -- "XADD (NEW, UPDATE, PURGED, HEARTBEAT)" --> Redis
-    
-    Redis          -- "XREAD (Consumes Events)"    --> Janitor
-    Janitor        -- "XTRIM / XDEL (Manages Stream)" --> Redis
+    LustreMDS --> Shipper
+    Shipper -- "XADD to hsm:actions:MDT0" --> Stream1
+    Shipper -- "XADD to hsm:actions:MDT1" --> Stream2
 
-    Redis          -- "Full Stream Replay"         --> Reconciler
-    LustreMDS      -- "Reads Ground Truth"         --> Reconciler
+    Stream1 & Stream2 & StreamN -- "Auto-discover & XREAD" --> Tail
+    Stream1 & Stream2 & StreamN -- "Auto-discover & XREAD" --> Top
+    Stream1 & Stream2 & StreamN -- "Auto-discover & XREAD" --> Stats
+    Stream1 & Stream2 & StreamN -- "Auto-discover & XREAD" --> Reconciler
+    Stream1 & Stream2 & StreamN -- "Auto-discover & XREAD" --> CustomConsumers
 
-    Redis          -- "Tails Stream for Live Updates" --> Viewer
-    Redis          -- "Full Stream Replay"         --> Stats
-    Redis          -- "Tails Stream for Custom Logic" --> CustomConsumers
-
-
-    %% Utility Outputs
-    Reconciler     -. "Outputs Validation Report"  .-> User
-    Viewer         -. "Displays Interactive TUI"   .-> User
-    Stats          -. "Outputs JSON Metrics"       .-> Metrics
+    Top -. "Displays Interactive TUI" .-> User
+    Stats -. "Outputs JSON Metrics" .-> Metrics
 ```
 
----
+### The `hsm-action-shipper`: A Self-Healing Producer
 
-## Components
+The shipper daemon is the heart of the system. It runs on each MDS and performs two distinct roles in separate threads.
 
-This project provides the following command-line tools:
-
-### `hsm-action-shipper` (Producer Daemon)
-
-A daemon designed for reliable operation on each Lustre Metadata Server (MDS). It monitors `hsm/actions` files, processes log entries, and ships them as structured events to a central Redis stream.
-
-#### Key Technical Features
-
-*   **State-Change Detection:** At each poll interval, it calculates an MD5 hash of every line in the `hsm/actions` files. By comparing these hashes to its persistent local cache (`cache.json`), it deterministically generates event types:
-    *   **`NEW`**: An action appears that was not in the cache.
-    *   **`UPDATE`**: An action's line hash changes (e.g., its `status` field is modified).
-    *   **`PURGED`**: An action that was in the cache is no longer present in the files.
-
-*   **Liveness Heartbeating:** To support the `hsm-stream-janitor`, it sends a lightweight `HEARTBEAT` event for any action that has not changed state within a configurable `heartbeat_interval`. This proves the action is still live, even if it's in a long-term `WAITING` state, allowing the janitor to safely reap genuinely stale actions.
-
-*   **Transactional Event Shipping:** The shipper operates on an "all-or-nothing" principle per cycle. Its local cache is only updated and saved to disk *after* a batch of events has been successfully written to Redis. If the Redis connection fails, the cache remains unchanged. The next poll cycle will then re-generate the exact same events and attempt to ship them again, guaranteeing at-least-once delivery.
-
-*   **Graceful Shutdown & Resiliency:** Responds to `SIGINT`/`SIGTERM` to finish its current cycle before exiting. If Redis is unavailable, it attempts to reconnect with exponential backoff without dropping events.
-
-### `hsm-stream-janitor` (Garbage Collector Daemon)
-
-A state-driven garbage collector for the Redis action stream. Its primary purpose is to prevent the stream from growing infinitely by safely trimming events that are no longer part of any active HSM operation.
-
-*   **State-Driven Trimming:** By consuming all events, it builds an in-memory model of all live actions. It periodically finds the oldest event ID that is still referenced by a live action and issues an `XTRIM` command to delete all older entries.
-
-*   **Stale Action Reaping (Self-Healing):** If a `PURGED` event is missed (e.g., due to shipper downtime), the janitor uses a configurable `stale_action_timeout_seconds` to detect and remove "stale" actions from its state. This critical feature works in tandem with the shipper's `HEARTBEAT` events to unblock stream trimming and ensure the system is self-correcting.
-
-### `hsm-stream-reconciler` (Auditor Utility)
-
-A command-line utility to validate the integrity of the Redis stream data against the "ground truth" of the Lustre `hsm/actions` files. It builds one state model from the Lustre files and a second by replaying the stream, then compares them and reports on discrepancies like missing or extra actions.
-
-### `hsm-action-top` (Live Viewer)
-
-A `top`-like terminal dashboard for real-time monitoring of HSM activity. It connects to the Redis stream, builds an initial state, and then listens for live events to provide a continuously updating, aggregated view of all ongoing actions.
-
-#### Example view
-
-```
---- Lustre HSM Action Dashboard ---
-Time: 2025-09-22 10:39:32 | Redis: Connected
-Viewer Status: Bootstrap complete (269,124 events). Listening for live updates...
-Live Actions: 268,506 | Last Event: 1s ago
-
---- Live Action Count by (MDT, Action, Status) ---
-MDT         | ACTION  | STATUS     |      COUNT DIFF      
-----------------------------------------------------------
-elm-MDT0000 | ARCHIVE | STARTED    |     13,365 
-elm-MDT0000 | ARCHIVE | SUCCEED    |        140 
-elm-MDT0001 | ARCHIVE | STARTED    |     50,000 
-elm-MDT0001 | ARCHIVE | WAITING    |     38,732 
-elm-MDT0002 | ARCHIVE | STARTED    |    111,680 
-elm-MDT0002 | ARCHIVE | SUCCEED    |          2 
-elm-MDT0003 | ARCHIVE | STARTED    |     54,583 (+3,033)
-elm-MDT0003 | ARCHIVE | WAITING    |          4 (+1)
+```mermaid
+graph TD
+    subgraph "hsm-action-shipper Process"
+        direction LR
+        subgraph "Shipper Thread (High Frequency)"
+            direction TB
+            A[Poll /sys/.../hsm/actions<br/>(every 20s)] --> B{Compare with<br/>local cache};
+            B --> |Change Detected| C[Generate NEW,<br/>UPDATE, PURGED<br/>Events];
+            C --> D[XADD Events to<br/>Redis Stream];
+            D --> E[Update Local Cache];
+        end
+        subgraph "Maintenance Thread (Low Frequency)"
+            direction TB
+            F[Receive Trigger<br/>(every 6 hours)] --> G{Run Maintenance Cycle};
+            G --> H[<b>1. Validate Consistency</b><br/>Fix orphan events];
+            H --> I[<b>2. Garbage Collect</b><br/>Trim old events from stream];
+        end
+        E -- "Periodically Triggers" --> F;
+    end
 ```
 
-### `hsm-stream-stats` (Metrics Collector)
+#### 1. High-Frequency Event Shipping
+*   **State-Change Detection:** At each poll interval (e.g., 20s), it calculates an MD5 hash of every line in the `hsm/actions` files. By comparing these hashes to a persistent local cache, it deterministically generates `NEW`, `UPDATE`, and `PURGED` events.
+*   **Dynamic MDT Discovery:** The shipper re-scans the filesystem on every poll cycle. This allows it to automatically start monitoring an MDT that fails over *to* its host, and automatically stop monitoring (and clean up its state for) an MDT that fails over *away* from its host, all without a restart.
+*   **Transactional Shipping:** The shipper's local cache is only updated *after* events are successfully written to Redis. If Redis is unavailable, the cache remains unchanged, and the shipper will re-send the same events on the next cycle, guaranteeing at-least-once delivery.
 
-A stateless command-line utility designed for integration with monitoring systems (e.g., Telegraf). On each run, it performs a full replay of the stream to generate an accurate point-in-time snapshot of the system state, outputting the result as a single JSON object.
+#### 2. Low-Frequency Maintenance Cycle
+On a long, configurable interval (e.g., every 6 hours), the shipper performs a background maintenance task on the streams it owns:
+*   **Consistency Validation (Self-Healing):** It replays its own streams to find "orphan" actions—entries that exist in Redis but no longer on the filesystem (e.g., due to a missed `PURGED` event). It then injects a corrective `PURGED` event to fix the inconsistency.
+*   **Garbage Collection (Trimming):** After validation, it identifies the oldest event ID belonging to any currently live action. It then issues an `XTRIM` command to Redis to delete all older events from the stream, preventing infinite growth and managing memory usage.
+*   **Aggressive Trimming:** If a trim operation removes more than a configured `aggressive_trim_threshold` (e.g., 5000) of entries, it immediately re-trims, ensuring that large backlogs are cleared efficiently.
 
----
+### Public Consumer API (`StreamReader`)
 
-## Redis Stream Event Structure
+For building custom integrations, the project provides a simple, high-level Python API. The `StreamReader` class handles all the complexity of stream discovery, multi-stream reading, and robust reconnection.
 
-Events are added to a Redis stream via `XADD`. Each entry contains a single field, `data`, holding a JSON-encoded string.
+**Example: A custom alerter for failed actions**
+```python
+#!/usr/bin/env python3
+# alert_on_failure.py
+from lustre_hsm_action_stream.consumer import StreamReader
+import logging
 
-**Example `UPDATE` payload:**
-```json
-{
-  "event_type": "UPDATE",
-  "action": "ARCHIVE",
-  "fid": "0x2000057b4:0x1d648:0x0",
-  "status": "STARTED",
-  "mdt": "elm-MDT0000",
-  "cat_idx": 520,
-  "rec_idx": 36052,
-  "timestamp": 1758517756,
-  "raw": "lrh=[type=10680000 len=192 idx=520/36052] fid=[0x2000057b4:0x1d648:0x0] ... status=STARTED ...]"
-}
+# Configure logging for the consumer library
+logging.basicConfig(level="INFO")
+
+# Create a reader that will discover all streams with the prefix 'hsm:actions'
+reader = StreamReader(
+    host='redis.cluster.local',
+    port=6379,
+    db=1,
+    prefix='hsm:actions'
+)
+
+print("Monitoring for failed HSM actions...")
+try:
+    # This generator blocks and yields events as they arrive from any MDT.
+    for event in reader.events():
+        if event.data.get('status') == 'FAILED':
+            mdt = event.data.get('mdt')
+            fid = event.data.get('fid')
+            print(f"ALERT: Action failed on {mdt} for FID {fid}!", file=sys.stderr)
+            # Add custom logic here, e.g., send an email or a Slack notification.
+
+except KeyboardInterrupt:
+    print("Stopped.")
 ```
-**Example `HEARTBEAT` payload:**
-```json
-{
-  "event_type": "HEARTBEAT",
-  "mdt": "elm-MDT0000",
-  "cat_idx": 520,
-  "rec_idx": 36052,
-  "timestamp": 1758517956
-}
-```
 
----
+## Credits
 
-## Installation
+This project is maintained and used in production by [Stanford Research Computing](https://srcc.stanford.edu/)
+on [Elm Cold Storage](https://docs.elm.stanford.edu/).
 
-This project is packaged as an RPM. After installation, the following files and directories are created:
+### Acknowledgments
 
-*   **System Binaries:** `/usr/sbin/hsm-action-shipper`, `/usr/sbin/hsm-stream-janitor`, `/usr/sbin/hsm-stream-reconciler`, `/usr/sbin/hsm-stream-stats`
-*   **User Binary:** `/usr/bin/hsm-action-top`
-*   **Configuration:** `/etc/lustre-hsm-action-stream/`
-*   **Systemd Services:** `hsm-action-shipper.service`, `hsm-stream-janitor.service`
-*   **Cache Directory:** `/var/cache/hsm-action-shipper/`
+*   **Kilian Cavalotti:** For valuable contributions to the architectural review and design discussions.
+*   **Various AI:** For confidently providing the wrong answers that ultimately led to the right ones.
 
----
+Have questions? Feel free to contact us at srcc-support@stanford.edu
 
-## Usage
-
-### `hsm-action-shipper` (on each MDS)
-
-1.  **Configure:** Edit `/etc/lustre-hsm-action-stream/hsm_action_shipper.yaml` to set your `redis_host` and other parameters.
-2.  **Enable and start the service:**
-    ```bash
-    systemctl enable --now hsm-action-shipper.service
-    ```
-3.  **Check status and logs:**
-    ```bash
-    systemctl status hsm-action-shipper.service
-    journalctl -u hsm-action-shipper.service -f
-    ```
-
-### `hsm-stream-janitor` (on a central server)
-
-1.  **Configure:** Edit `/etc/lustre-hsm-action-stream/hsm_stream_janitor.yaml` to point to your `redis_host`. The `stale_action_timeout_seconds` should be safely longer than the shipper's `heartbeat_interval`.
-2.  **Enable and start the service:**
-    ```bash
-    systemctl enable --now hsm-stream-janitor.service
-    ```
-3.  **Check logs:**
-    ```bash
-    journalctl -u hsm-stream-janitor.service -f
-    ```
-
-### Other Utilities
-
-*   **`hsm-stream-reconciler`:** Run on an MDS to validate the stream.
-    ```bash
-    # Validate against a specific Redis host, scoping to certain MDTs
-    hsm-stream-reconciler --host my-redis.internal --mdts elm-MDT0000 elm-MDT0001
-    ```
-*   **`hsm-action-top`:** Run from any machine that can connect to Redis.
-    ```bash
-    # Connect to a specific Redis host with a 2-second refresh interval
-    hsm-action-top --host my-redis.internal --interval 2
-    ```
-*   **`hsm-stream-stats`:** Typically run by a monitoring agent like Telegraf.
-    ```bash
-    # Output metrics as a JSON object
-    hsm-stream-stats -c /etc/lustre-hsm-action-stream/hsm_stream_stats.yaml
-    ```
+<div align="center">
+  <a href="http://www.stanford.edu" ><img src="SUSigSeal.png" width="180px"></a><br><br>
+</div>

@@ -1,8 +1,9 @@
-# config/hsm_stream_stats.yaml
-# --- Redis Connection (REQUIRED) ---
+# config/hsm_stream_tail.yaml
+# --- Lustre Filesystem (REQUIRED) ---
+mountpoint: /lustre
+# --- Redis Connection ---
 redis_host: "localhost"
 redis_port: 6379
 redis_db: 1
-
 # The PREFIX used to discover all MDT-specific streams (e.g., hsm:actions:*)
 redis_stream_prefix: "hsm:actions"

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lustre-hsm-action-stream"
-version = "0.1.0"
+version = "0.2.0"
 description = "A toolkit for shipping and reconciling Lustre HSM action events."
 readme = "README.md"
 requires-python = ">=3.9"
@@ -31,8 +31,8 @@ Homepage = "https://github.com/stanford-rc/lustre-hsm-action-stream"
 hsm-action-shipper = "lustre_hsm_action_stream.shipper:main"
 hsm-stream-reconciler = "lustre_hsm_action_stream.reconciler:main"
 hsm-action-top = "lustre_hsm_action_stream.viewer:main"
-hsm-stream-janitor = "lustre_hsm_action_stream.janitor:main"
 hsm-stream-stats = "lustre_hsm_action_stream.stats:main"
+hsm-stream-tail = "lustre_hsm_action_stream.tail:main"
 
 # This section provides configuration for setuptools, replacing [options] from setup.cfg
 [tool.setuptools]

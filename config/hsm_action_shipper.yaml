@@ -12,36 +12,32 @@ redis_port: 6379
 # Ensure this database is not used by another application.
 redis_db: 1
 
-# The name of the Redis Stream where events will be published.
-# It is strongly recommended to keep this default name, as all other tools
-# in this suite (reconciler, viewer) are configured to use it by default.
-redis_stream_name: "hsm:actions"
+# The PREFIX for the Redis Streams. The shipper will append the MDT name
+# to this prefix to create a stream per MDT.
+# Example: hsm:actions:elm-MDT0000, hsm:actions:elm-MDT0001, etc.
+redis_stream_prefix: "hsm:actions"
 
 # --- 2. Filesystem Polling ---
 # This default glob will automatically find any Lustre filesystem on the MDS.
-# For clarity, or to limit the scope in a multi-filesystem environment, it is
-# recommended to replace the wildcard '*' with your specific fsname.
-# e.g., "/sys/kernel/debug/lustre/mdt/elm-MDT*/hsm/actions"
 mdt_watch_glob: "/sys/kernel/debug/lustre/mdt/*-MDT*/hsm/actions"
 
-# How often to poll the actions files, in seconds.
-#
-# IMPORTANT: To reliably capture the final status of an action before it is
-# purged, the polling rate must be fast enough. Lustre keeps completed actions
-# visible for 'hsm/grace_delay' seconds (default: 60s).
-#
-# Following the Nyquist sampling principle, to guarantee you capture this
-# state, you must sample at a rate more than twice the signal's frequency.
-# Therefore, poll_interval should be less than half of hsm/grace_delay.
+# How often to poll the actions files, in seconds. This should be less
+# than half of the 'hsm/grace_delay' setting in Lustre (default 60s).
 poll_interval: 20
 
-# How often to send a "HEARTBEAT" event for an action that has not changed state.
-# This proves the action is still alive and prevents the janitor from reaping it.
-# This value should be significantly shorter than the janitor's 'stale_action_timeout_seconds'.
-# Value is in seconds.
-heartbeat_interval: 21600 # 6 hours
+# --- 3. Maintenance and Trimming ---
+# How often the shipper should run its internal maintenance task. This task
+# validates stream consistency and trims old events.
+reconcile_interval: 21600 # 6 hours
 
-# --- 3. Cache and Logging ---
+# Redis limits how many entries can be trimmed at once (usually up to 10k).
+# This can be problematic for large backlogs.
+# If the maintenance task trims more than aggressive_trim_threshold entries
+# from a stream in one pass, it will immediately run the trim operation again
+# or that stream to efficiently clear large backlogs.
+aggressive_trim_threshold: 5000
+
+# --- 4. Cache and Logging ---
 # The file to store the shipper's persistent action cache.
 cache_path: "/var/cache/hsm-action-shipper/cache.json"
 
