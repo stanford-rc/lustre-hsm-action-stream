@@ -1,0 +1,10 @@
+#
+# Configuration for the hsm-stream-stats metrics collector.
+#
+
+# --- Redis Connection (REQUIRED) ---
+# These details MUST match the shipper's configuration.
+redis_host: "localhost"
+redis_port: 6379
+redis_db: 1
+redis_stream_name: "hsm:actions"
