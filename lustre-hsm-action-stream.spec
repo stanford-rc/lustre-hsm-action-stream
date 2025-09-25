@@ -51,6 +51,7 @@ mv %{buildroot}%{_bindir}/hsm-stream-reconciler %{buildroot}%{_sbindir}/
 install -d -m 755 %{buildroot}%{_sysconfdir}/%{project_name}
 install -p -m 644 config/hsm_action_shipper.yaml %{buildroot}%{_sysconfdir}/%{project_name}/
 install -p -m 644 config/hsm_stream_janitor.yaml %{buildroot}%{_sysconfdir}/%{project_name}/
+install -p -m 644 config/hsm_stream_stats.yaml %{buildroot}%{_sysconfdir}/%{project_name}/
 
 install -d -m 755 %{buildroot}%{_unitdir}
 install -p -m 644 systemd/hsm-action-shipper.service %{buildroot}%{_unitdir}/
@@ -77,6 +78,7 @@ install -d -m 750 %{buildroot}/var/cache/hsm-action-shipper
 # Configuration files
 %config(noreplace) %{_sysconfdir}/%{project_name}/hsm_action_shipper.yaml
 %config(noreplace) %{_sysconfdir}/%{project_name}/hsm_stream_janitor.yaml
+%config(noreplace) %{_sysconfdir}/%{project_name}/hsm_stream_stats.yaml
 
 # System binaries in /usr/sbin
 %{_sbindir}/hsm-action-shipper
@@ -85,6 +87,7 @@ install -d -m 750 %{buildroot}/var/cache/hsm-action-shipper
 # User binaries in /usr/bin
 %{_bindir}/hsm-action-top
 %{_bindir}/hsm-stream-janitor
+%{_bindir}/hsm-stream-stats
 
 # The Python library itself
 %{python3_sitelib}/lustre_hsm_action_stream/

@@ -60,6 +60,13 @@ def get_stream_derived_state(r, stream_name):
                         stream_state[key] = event.get('status')
                     elif event['event_type'] == "PURGED":
                         stream_state.pop(key, None)
+                    elif event['event_type'] == "HEARTBEAT":
+                        # A HEARTBEAT confirms an action is alive. If we haven't seen it
+                        # before (e.g., due to a trimmed stream), we must add it to our
+                        # state. This prevents false "missing from stream" errors.
+                        # We mark its status as UNKNOWN since heartbeats don't carry status.
+                        if key not in stream_state:
+                            stream_state[key] = 'UNKNOWN (from heartbeat)'
                 except (json.JSONDecodeError, KeyError) as e:
                     print(f"  - WARNING: Could not parse event {msg_id}: {e}", file=sys.stderr)
                 last_id = msg_id

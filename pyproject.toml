@@ -32,6 +32,7 @@ hsm-action-shipper = "lustre_hsm_action_stream.shipper:main"
 hsm-stream-reconciler = "lustre_hsm_action_stream.reconciler:main"
 hsm-action-top = "lustre_hsm_action_stream.viewer:main"
 hsm-stream-janitor = "lustre_hsm_action_stream.janitor:main"
+hsm-stream-stats = "lustre_hsm_action_stream.stats:main"
 
 # This section provides configuration for setuptools, replacing [options] from setup.cfg
 [tool.setuptools]

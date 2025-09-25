@@ -58,7 +58,7 @@ class Janitor:
         # This dictionary is the core of the janitor's state. It tracks all
         # actions believed to be "live" in the Lustre HSM system.
         # Key: (mdt, cat_idx, rec_idx)
-        # Value: {'id': str, 'status': str, 'terminal_ts': float | None}
+        # Value: {'id': str, 'status': str, 'last_seen_ts': float}
         self.live_actions = {}
         
         # A lock to protect access to the 'live_actions' dictionary from
@@ -113,30 +113,31 @@ class Janitor:
             event = json.loads(event_data[b'data'])
             key = (event['mdt'], event['cat_idx'], event['rec_idx'])
             msg_id_str = msg_id.decode() if isinstance(msg_id, bytes) else str(msg_id)
-            new_status = event.get('status')
+            event_ts = self._id_to_timestamp(msg_id_str)
 
             if event['event_type'] in ("NEW", "UPDATE"):
-                existing_action = self.live_actions.get(key)
-                if not existing_action:
-                    # New action.
+                self.live_actions[key] = {
+                    'id': msg_id_str,
+                    'status': event.get('status'),
+                    'last_seen_ts': event_ts
+                }
+            elif event['event_type'] == "HEARTBEAT":
+                if key in self.live_actions:
+                    # Refresh the timestamp and event ID, but keep existing status
+                    self.live_actions[key]['last_seen_ts'] = event_ts
+                    self.live_actions[key]['id'] = msg_id_str
+                else:
+                    # This can happen if janitor restarts and misses the original NEW event.
+                    # We add a placeholder to ensure the action is tracked.
+                    logging.info(f"Received heartbeat for untracked action {key}. Adding placeholder.")
                     self.live_actions[key] = {
                         'id': msg_id_str,
-                        'status': new_status,
-                        'terminal_ts': self._id_to_timestamp(msg_id_str) if new_status in ('SUCCEED', 'FAILED') else None
+                        'status': 'UNKNOWN (from heartbeat)',
+                        'last_seen_ts': event_ts
                     }
-                elif existing_action.get('status') != new_status:
-                    # Status changed.
-                    existing_action['id'] = msg_id_str
-                    existing_action['status'] = new_status
-                    if new_status in ('SUCCEED', 'FAILED'):
-                        existing_action['terminal_ts'] = self._id_to_timestamp(msg_id_str)
-                    else:
-                        existing_action['terminal_ts'] = None
-                else:
-                    # Same status update, just a new event ID. Don't reset terminal_ts!
-                    existing_action['id'] = msg_id_str
             elif event['event_type'] == "PURGED":
                 self.live_actions.pop(key, None)
+
             return msg_id_str
         except (json.JSONDecodeError, KeyError) as e:
             logging.warning(f"Could not parse event, skipping. Error: {e}. Raw: {event_data}")
@@ -201,8 +202,7 @@ class Janitor:
 
     def janitor_task(self, run_once=False):
         """
-        Periodic task: reaps stale terminal actions and trims Redis stream.
-        - Stale terminal is defined by terminal_state_timeout_seconds (default: 300s).
+        Periodic task: reaps stale actions and trims Redis stream.
         """
         logging.info("Waiting for initial bootstrap from Redis stream...")
         self.is_bootstrapped.wait()
@@ -211,27 +211,34 @@ class Janitor:
         while True:
             try:
                 # --- SELF-HEALING LOGIC ---
-                # This block handles "zombie" actions where the shipper might have missed
-                # a PURGED event (e.g., due to downtime). If an action has been in a
-                # terminal state (SUCCEED/FAILED) for too long, we assume it's a zombie
-                # and reap it from our internal state. This prevents garbage collection
-                # from halting indefinitely.
-                timeout = self.conf.get('terminal_state_timeout_seconds', 300)
+                # This block handles any "stale" action. If we haven't seen any event
+                # (NEW, UPDATE, or HEARTBEAT) for an action in a long time, we assume
+                # it's a zombie whose PURGED event was missed and reap it.
+                timeout = self.conf.get('stale_action_timeout_seconds', 86400)
                 now = time.time()
                 reaped = []
+
                 with self.state_lock:
                     for key, action in list(self.live_actions.items()):
-                        if action.get('status') in ('SUCCEED', 'FAILED'):
-                            tts = action.get('terminal_ts')
-                            if tts is not None and (now - tts) > timeout:
-                                logging.warning(
-                                    f"Reaping stale terminal action {key} (status: {action['status']}) "
-                                    f"due to timeout ({timeout}s). The PURGED event was likely missed."
-                                )
-                                reaped.append((key, action))
+                        last_seen = action.get('last_seen_ts')
+                        # The logic is now a single, simple check.
+                        if last_seen is not None and (now - last_seen) > timeout:
+                            logging.warning(
+                                f"Reaping stale action {key} (status: {action.get('status', 'N/A')}, "
+                                f"last seen: {int(now - last_seen)}s ago) due to timeout ({timeout}s). "
+                                f"The final PURGED event was likely missed."
+                            )
+                            reaped.append((key, action))
+
+                with self.state_lock:
                     for key, action in reaped:
                         self.live_actions.pop(key)
-                        # Explicit XDEL if requested:
+                        # If this was an orphan heartbeat-only action, log it distinctly
+                        if action.get('status') == 'UNKNOWN (from heartbeat)':
+                            logging.warning(
+                                f"Reaped orphan action {key} created only by heartbeat (never saw NEW)."
+                        )
+                        # Optional XDEL logic
                         if self.conf.get('xdel_reaped', False) and not self.dry_run:
                             id_to_remove = action.get('id')
                             if id_to_remove:
@@ -245,8 +252,9 @@ class Janitor:
                                     logging.info(f"Explicitly XDEL zombie event {id_to_remove} due to reaping.")
                                 except Exception as e:
                                     logging.error(f"Failed to XDEL zombie entry {id_to_remove}: {e}")
+
                 if reaped:
-                    logging.info(f"Reaped {len(reaped)} stale terminal actions this cycle.")
+                    logging.info(f"Reaped {len(reaped)} stale actions this cycle.")
 
                 # --- TRIMMING LOGIC ---
                 with self.state_lock:

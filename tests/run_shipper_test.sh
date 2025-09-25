@@ -19,6 +19,8 @@ ACTIONS_FILE="$MDT_PATH/hsm/actions"
 CACHE_FILE="$TEST_DIR/cache.json"
 CONFIG_FILE="$TEST_DIR/config.yaml"
 
+# Add the new heartbeat_interval parameter for clarity and completeness.
+# A long value is fine here as this test doesn't check heartbeats.
 cat > "$CONFIG_FILE" <<EOF
 mdt_watch_glob: "$ACTIONS_FILE"
 cache_path: "$CACHE_FILE"
@@ -27,6 +29,7 @@ redis_host: "$REDIS_HOST"
 redis_port: $REDIS_PORT
 redis_db: $REDIS_DB
 redis_stream_name: "hsm:actions"
+heartbeat_interval: 3600
 log_level: "DEBUG"
 EOF
 

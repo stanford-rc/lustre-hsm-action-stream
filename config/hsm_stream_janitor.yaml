@@ -13,12 +13,12 @@ redis_stream_name: "hsm:actions"
 # How often the janitor will analyze the stream and perform a cleanup, in seconds.
 operation_interval_seconds: 120
 
-# --- Self-Healing Timeout (Recommended) ---
-# How long to wait before forcefully removing an action that is in a 'SUCCEED'
-# or 'FAILED' state but for which no 'PURGED' event was received.
-# This prevents 'zombie' actions from halting garbage collection indefinitely.
-# This value should be safely longer than Lustre's 'hsm/grace_delay' (60s).
-terminal_state_timeout_seconds: 600 # 10 minutes
+# --- Self-Healing Timeout ---
+# How long to wait before forcefully removing an action for which NO event
+# (including a heartbeat) has been seen. This is a safety net for "stale"
+# actions where a PURGED event was missed.
+# This value should be safely longer than the shipper's 'heartbeat_interval'.
+stale_action_timeout_seconds: 86400 # 24 hours
 
 # --- Logging ---
 log_level: "INFO"

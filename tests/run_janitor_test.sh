@@ -23,6 +23,7 @@ JANITOR_CONFIG_FILE="$TEST_DIR/janitor_config.yaml"
 mkdir -p "$MDT_PATH/hsm"
 
 # --- Create Configs ---
+# Shipper config is unchanged, but heartbeat interval is not used in this test.
 cat > "$SHIPPER_CONFIG_FILE" <<EOF
 mdt_watch_glob: "$ACTIONS_FILE"
 cache_path: "$SHIPPER_CACHE_FILE"
@@ -31,6 +32,7 @@ redis_host: "$REDIS_HOST"
 redis_port: $REDIS_PORT
 redis_db: $REDIS_DB
 redis_stream_name: "hsm:actions"
+heartbeat_interval: 3600
 log_level: "DEBUG"
 EOF
 
@@ -41,7 +43,7 @@ redis_port: $REDIS_PORT
 redis_db: $REDIS_DB
 redis_stream_name: "hsm:actions"
 operation_interval_seconds: 1
-terminal_state_timeout_seconds: 2
+stale_action_timeout_seconds: 2
 xdel_reaped: true
 log_level: "DEBUG"
 EOF
@@ -85,15 +87,20 @@ JANITOR_LOG=$(PYTHONPATH=src python -m lustre_hsm_action_stream.janitor -c "$JAN
 echo "--- TEST 5: Verifying results ---"
 echo "$JANITOR_LOG"
 
-# Check that the reaping message was logged.
-echo "$JANITOR_LOG" | grep "Reaping stale terminal action"
+# Check that the reaping message was logged for both actions.
+# This proves the new logic is working.
+if [ $(echo "$JANITOR_LOG" | grep -c "Reaping stale action") -ne 2 ]; then
+    echo "ERROR: Expected to reap 2 stale actions, but didn't find the log messages."
+    exit 1
+fi
 
-# The final stream length should be exactly 2.
-# The remaining events are `NEW C` and `PURGED A`.
-# `NEW A` and `NEW B` were trimmed. `UPDATE B` was XDEL'd.
+# The final stream length should be exactly 1.
+# The remaining event is `PURGED A`.
+# `NEW A` and `NEW B` were trimmed in step 3.
+# `UPDATE B` and `NEW C` were reaped and XDEL'd in step 5.
 STREAM_LEN=$(redis-cli -h "$REDIS_HOST" -p "$REDIS_PORT" -n "$REDIS_DB" XLEN hsm:actions)
-if [ "$STREAM_LEN" -ne 2 ]; then
-    echo "ERROR: Stream was not trimmed correctly! Expected length 2, but got $STREAM_LEN"
+if [ "$STREAM_LEN" -ne 1 ]; then
+    echo "ERROR: Stream was not trimmed correctly! Expected length 1, but got $STREAM_LEN"
     exit 1
 fi
 

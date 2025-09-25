@@ -110,7 +110,7 @@ def load_cache(path):
             parts = k.split(':', 2)
             # key_tuple: (mdt_name, cat_idx, rec_idx)
             key_tuple = (parts[0], int(parts[1]), int(parts[2]))
-            cache[key_tuple] = v
+            cache[key_tuple] = v # {'hash':..., 'last_event_ts':..., etc}
         return cache
     except Exception as e:
         logging.warning(f"Could not load cache file {path}, starting fresh. Error: {e}")
@@ -129,13 +129,15 @@ def save_cache(cache, path):
     except Exception as e:
         logging.error(f"Failed to save cache file {path}: {e}")
 
-def process_action_files(mdt_files, cache):
+def process_action_files(mdt_files, cache, heartbeat_interval):
     """
-    Scans HSM actions files for live actions, detects new/updated events.
+    Scans HSM actions files for live actions, detects new/updated/heartbeat events.
     Returns a list of events to ship and a set of all keys seen this cycle.
     """
     events_to_ship = []
     keys_seen_this_cycle = set()
+    now = time.time() # Get time once per cycle
+
     for action_file in mdt_files:
         # Assumes path is like .../<mdt_name>/hsm/actions
         mdt_name = os.path.basename(os.path.dirname(os.path.dirname(action_file)))
@@ -155,28 +157,47 @@ def process_action_files(mdt_files, cache):
                     line_hash = hashlib.md5(line.encode()).hexdigest()
 
                     cached_entry = cache.get(key)
-                    current_entry = {'hash': line_hash, 'action': data.get('action'),
-                                     'fid': data.get('fid'), 'status': data.get('status')}
 
                     event_type = None
+                    event = {}
+
                     if not cached_entry:
                         event_type = "NEW"
                     elif cached_entry['hash'] != line_hash:
                         event_type = "UPDATE"
+                    elif (now - cached_entry.get('last_event_ts', 0)) > heartbeat_interval:
+                        event_type = "HEARTBEAT"
 
                     if event_type:
-                        cache[key] = current_entry
-                        event = {
-                            "event_type": event_type,
-                            "action": data.get('action'),
-                            "fid": data.get('fid'),
-                            "status": data.get('status'),
-                            "mdt": mdt_name,
-                            "cat_idx": cat_idx,
-                            "rec_idx": rec_idx,
-                            "timestamp": int(time.time()),
-                            "raw": line
+                        # Update the cache for all event types to reset the timer
+                        cache[key] = {
+                            'hash': line_hash,
+                            'last_event_ts': now,
+                            'action': data.get('action'),
+                            'fid': data.get('fid')
                         }
+
+                        if event_type == "HEARTBEAT":
+                            event = {
+                                "event_type": "HEARTBEAT",
+                                "mdt": mdt_name,
+                                "cat_idx": cat_idx,
+                                "rec_idx": rec_idx,
+                                "timestamp": int(now),
+                            }
+                        else: # NEW or UPDATE
+                            event = {
+                                "event_type": event_type,
+                                "action": data.get('action'),
+                                "fid": data.get('fid'),
+                                "status": data.get('status'),
+                                "mdt": mdt_name,
+                                "cat_idx": cat_idx,
+                                "rec_idx": rec_idx,
+                                "timestamp": int(now),
+                                "raw": line
+                            }
+
                         events_to_ship.append(event)
         except Exception as e:
             logging.error(f"Error processing {action_file}: {e}")
@@ -210,6 +231,10 @@ def watcher_and_shipper_loop(conf, run_once=False):
     cache = load_cache(conf['cache_path'])
     logging.info(f"Loaded {len(cache)} actions from persistent cache.")
     redis_connector = RedisConnector(conf['redis_host'], conf['redis_port'], conf['redis_db'])
+
+    heartbeat_interval = conf.get('heartbeat_interval', 21600)
+    logging.info(f"Using heartbeat interval of {heartbeat_interval}s.")
+
     cycle_num = 0
     logging.info(f"Started watcher on MDT glob: {conf['mdt_watch_glob']} every {conf['poll_interval']}s.")
 
@@ -222,7 +247,7 @@ def watcher_and_shipper_loop(conf, run_once=False):
         if not mdt_files:
             logging.warning(f"No files found for glob: {conf['mdt_watch_glob']}")
 
-        new_and_updated_events, keys_seen = process_action_files(mdt_files, cache)
+        new_and_updated_events, keys_seen = process_action_files(mdt_files, cache, heartbeat_interval)
         purged_events = purge_and_emit(cache, keys_seen)
         events_to_ship = new_and_updated_events + purged_events
 
