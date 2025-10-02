@@ -142,16 +142,16 @@ graph TD
         direction LR
         subgraph "Shipper Thread (High Frequency)"
             direction TB
-            A[Poll /sys/.../hsm/actions<br/>(every 20s)] --> B{Compare with<br/>local cache};
-            B --> |Change Detected| C[Generate NEW,<br/>UPDATE, PURGED<br/>Events];
-            C --> D[XADD Events to<br/>Redis Stream];
-            D --> E[Update Local Cache];
+            A["Poll /sys/.../hsm/actions<br/>(every 20s)"] --> B{"Compare with<br/>local cache"};
+            B --> |Change Detected| C["Generate NEW,<br/>UPDATE, PURGED<br/>Events"];
+            C --> D["XADD Events to<br/>Redis Stream"];
+            D --> E["Update Local Cache"];
         end
         subgraph "Maintenance Thread (Low Frequency)"
             direction TB
-            F[Receive Trigger<br/>(every 6 hours)] --> G{Run Maintenance Cycle};
-            G --> H[<b>1. Validate Consistency</b><br/>Fix orphan events];
-            H --> I[<b>2. Garbage Collect</b><br/>Trim old events from stream];
+            F["Receive Trigger<br/>(every 6 hours)"] --> G{"Run Maintenance Cycle"};
+            G --> H["<b>1. Validate Consistency</b><br/>Fix orphan events"];
+            H --> I["<b>2. Garbage Collect</b><br/>Trim old events from stream"];
         end
         E -- "Periodically Triggers" --> F;
     end
