@@ -3,7 +3,7 @@
 [![Lustre HSM Action Stream CI](https://github.com/stanford-rc/lustre-hsm-action-stream/actions/workflows/ci.yml/badge.svg)](https://github.com/stanford-rc/lustre-hsm-action-stream/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
-A high-performance, scalable, and operationally simple toolkit for creating a real-time event stream from Lustre's Hierarchical Storage Management (HSM) actions.
+A scalable and operationally simple toolkit for creating a real-time event stream from Lustre's Hierarchical Storage Management (HSM) actions.
 
 This suite provides a self-healing producer daemon that runs on each Lustre Metadata Server (MDS) and a collection of consumer utilities for monitoring, metrics, and integrity auditing of Lustre/HSM actions. It is designed to give administrators and developers a persistent, reliable, and easily consumable view of all HSM activity across a Lustre file system.
 
@@ -77,6 +77,85 @@ $ hsm-stream-stats
 }
 ```
 
+---
+
+## Installation and Configuration
+
+This project is designed to be built into an RPM for easy deployment on RHEL-based systems (like Rocky Linux or AlmaLinux).
+
+### Prerequisites
+1.  A running **Redis** server (version 5 or later) accessible from all Lustre MDS nodes.
+2.  Lustre client tools (for `lfs`) installed on any machine where you intend to run `hsm-stream-tail`.
+3.  Build tools on your build machine: `rpm-build`, `python3-devel`, `pyproject-rpm-macros`.
+
+### 1. Build the RPM
+On your build machine, clone the repository and use `rpmbuild` to create the package.
+```bash
+# Clone the repository
+git clone https://github.com/stanford-rc/lustre-hsm-action-stream.git
+cd lustre-hsm-action-stream
+
+# Create a source tarball
+tar -czvf lustre-hsm-action-stream-0.3.0.tar.gz --exclude=.git --transform='s,^,lustre-hsm-action-stream-0.3.0/,' .
+
+# Build the RPM (output will be in ~/rpmbuild/RPMS/noarch/)
+rpmbuild -ta lustre-hsm-action-stream-0.3.0.tar.gz
+```
+
+### 2. Deploy on Lustre Metadata Servers (MDS)
+Install the generated RPM on **each** of your Lustre MDS nodes. This installs the `hsm-action-shipper` daemon and its dependencies.
+
+```bash
+# On each MDS:
+dnf install python-lustre-hsm-action-stream-0.3.0-1.el9.noarch.rpm
+```
+
+### 3. Configure and Start the Service
+On each MDS, you only need to configure the Redis connection and start the service.
+
+1.  **Edit the configuration file:**
+    ```bash
+    vi /etc/lustre-hsm-action-stream/hsm_action_shipper.yaml
+    ```
+
+2.  **Set your Redis connection details.** At a minimum, you must change `redis_host`. It's also highly recommended to pick a dedicated `redis_db` number (0-15) that is not used by other applications.
+    ```yaml
+    # --- 1. Redis Connection (REQUIRED) ---
+    # You MUST edit 'redis_host' to point to your Redis server.
+    redis_host: "my-redis-server.cluster.local"
+    redis_port: 6379
+
+    # The Redis database number to use.
+    redis_db: 1
+    ```
+
+3.  **Enable and start the daemon:**
+    ```bash
+    systemctl enable --now hsm-action-shipper.service
+    ```
+
+4.  **Verify it's running:**
+    ```bash
+    systemctl status hsm-action-shipper.service
+    journalctl -u hsm-action-shipper.service -f
+    ```
+Repeat these steps for every MDS in your cluster. Each shipper will automatically find the local MDTs it needs to monitor.
+
+### 4. Using the Consumer Tools
+Install the same RPM on any client machine or management node where you want to run the monitoring tools.
+
+1.  **Configure Redis:** Edit the respective config files in `/etc/lustre-hsm-action-stream/` (e.g., `hsm_stream_tail.yaml`) to point to the same `redis_host` and `redis_db`.
+2.  **Run the tools:**
+    ```bash
+    # See a live dashboard of activity
+    hsm-action-top
+
+    # Tail the event stream (requires Lustre client tools installed)
+    hsm-stream-tail --from-beginning
+
+    # Get a JSON metrics snapshot for monitoring
+    hsm-stream-stats
+    ```
 ---
 
 ## Design and Technical Features
