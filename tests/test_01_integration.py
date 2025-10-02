@@ -187,48 +187,31 @@ def test_tail_tool_output_and_filtering(capsys):
     Tests the hsm-stream-tail tool's output formatting and filtering logic
     by mocking the event stream and the 'lfs' command.
     """
-    # 1. Define mock events that our fake stream will yield.
     started_event = StreamEvent(
-        stream='hsm:actions:test-MDT0000',
-        id='1-0',
-        data={
-            "event_type": "UPDATE", "action": "ARCHIVE", "status": "STARTED",
-            "mdt": "test-MDT0000", "fid": "[0xa:0xb:0xc]", "timestamp": 1700000000
-        }
+        stream='hsm:actions:test-MDT0000', id='1-0',
+        data={ "event_type": "UPDATE", "action": "ARCHIVE", "status": "STARTED", "mdt": "test-MDT0000", "fid": "[0xa:0xb:0xc]", "timestamp": 1700000000 }
     )
     purged_event = StreamEvent(
-        stream='hsm:actions:test-MDT0000',
-        id='1-1',
-        data={
-            "event_type": "PURGED", "mdt": "test-MDT0000", "cat_idx": 1, "rec_idx": 1,
-            "timestamp": 1700000001
-        }
+        stream='hsm:actions:test-MDT0000', id='1-1',
+        data={ "event_type": "PURGED", "mdt": "test-MDT0000", "cat_idx": 1, "rec_idx": 1, "timestamp": 1700000001 }
     )
 
-    # 2. Use patch to mock both the event source and the external 'lfs' command.
+    # Use patch to mock the event source, the external 'lfs' command, and its existence check.
     with patch('lustre_hsm_action_stream.consumer.StreamReader.events') as mock_events, \
-         patch('subprocess.run') as mock_subprocess:
+         patch('subprocess.run') as mock_subprocess, \
+         patch('shutil.which', return_value='/usr/bin/lfs'): # <-- THE FIX
 
         # --- Test A: Basic formatting and FID resolution ---
         print("\n--- Testing Tail (Basic Formatting) ---")
         mock_events.return_value = [started_event]
-        mock_subprocess.return_value = MagicMock(
-            returncode=0, stdout="/lustre/mock/path/to/file.dat\n"
-        )
-
-        # We call main() directly after mocking sys.argv to avoid the run_cli helper
+        mock_subprocess.return_value = MagicMock(returncode=0, stdout="/lustre/mock/path/to/file.dat\n")
+        
         with patch.object(sys, 'argv', ['hsm-stream-tail', '--mountpoint', '/lustre']):
-            try:
-                tail_main()
-            except SystemExit: # The main function calls sys.exit(0) at the end
-                pass
+            try: tail_main()
+            except SystemExit: pass
 
         captured = capsys.readouterr()
-        # Assert that the output contains all the expected formatted parts
-        assert "ARCHIVE" in captured.out
-        assert "STARTED" in captured.out
-        assert "/lustre/mock/path/to/file.dat" in captured.out
-        assert "(id: 1-0)" in captured.out
+        assert "ARCHIVE" in captured.out and "STARTED" in captured.out and "/lustre/mock/path/to/file.dat" in captured.out and "(id: 1-0)" in captured.out
 
         # --- Test B: Default filtering (should hide PURGED) ---
         print("\n--- Testing Tail (Default Filtering) ---")
@@ -236,10 +219,9 @@ def test_tail_tool_output_and_filtering(capsys):
         with patch.object(sys, 'argv', ['hsm-stream-tail', '--mountpoint', '/lustre']):
             try: tail_main()
             except SystemExit: pass
-
+        
         captured = capsys.readouterr()
-        assert "ARCHIVE" in captured.out  # The STARTED event should be visible
-        assert "PURGED" not in captured.out # The PURGED event should be hidden by default
+        assert "ARCHIVE" in captured.out and "PURGED" not in captured.out
 
         # --- Test C: Using --show to override default filter ---
         print("\n--- Testing Tail (--show PURGED) ---")
@@ -247,7 +229,6 @@ def test_tail_tool_output_and_filtering(capsys):
         with patch.object(sys, 'argv', ['hsm-stream-tail', '--mountpoint', '/lustre', '--show', 'PURGED']):
             try: tail_main()
             except SystemExit: pass
-
+            
         captured = capsys.readouterr()
-        assert "ARCHIVE" in captured.out # STARTED is still visible
-        assert "PURGED" in captured.out  # PURGED is now also visible
+        assert "ARCHIVE" in captured.out and "PURGED" in captured.out
