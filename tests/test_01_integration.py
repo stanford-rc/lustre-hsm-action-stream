@@ -11,7 +11,8 @@ from lustre_hsm_action_stream.shipper import main as shipper_main
 from lustre_hsm_action_stream.stats import main as stats_main
 from lustre_hsm_action_stream.viewer import main as viewer_main, HSMStateTracker
 from lustre_hsm_action_stream.reconciler import main as reconciler_main
-from lustre_hsm_action_stream.consumer import StreamReader
+from lustre_hsm_action_stream.tail import main as tail_main
+from lustre_hsm_action_stream.consumer import StreamEvent, StreamReader
 import redis
 
 def test_shipper_new_update_purge(test_env, redis_conn_params, run_cli):
@@ -141,3 +142,112 @@ def test_reconciler_tool(test_env, capsys, redis_conn_params, run_cli):
     captured_fail = capsys.readouterr()
     assert "FAILURE: Critical discrepancies found" in captured_fail.out
     assert "ERROR: 1 actions found in stream state but are PURGED" in captured_fail.out
+
+def test_stats_tool_output_structure(test_env, capsys, run_cli):
+    """
+    Validates that the hsm-stream-stats output conforms to the expected JSON structure
+    with top-level 'summary', 'streams', and 'breakdown' keys.
+    """
+    actions_file = test_env["actions_file"]
+    shipper_config = test_env["shipper_config"]
+    stats_config = test_env["stats_config"]
+
+    # 1. Populate the stream with at least one action to ensure output is not empty.
+    actions_file.write_text("idx=[1/1] action=ARCHIVE fid=[0xa] status=STARTED\n")
+    run_cli(shipper_main, '-c', str(shipper_config))
+
+    # 2. Run the stats tool and capture its JSON output.
+    run_cli(stats_main, '-c', str(stats_config))
+    captured = capsys.readouterr()
+    stats_json = json.loads(captured.out)
+
+    # 3. Assert the top-level structure is correct.
+    assert set(stats_json.keys()) == {'summary', 'streams', 'breakdown'}
+
+    # 4. Validate the structure of the 'summary' object.
+    assert isinstance(stats_json['summary'], dict)
+    assert 'total_live_actions' in stats_json['summary']
+
+    # 5. Validate the structure of the 'streams' list.
+    assert isinstance(stats_json['streams'], list)
+    assert len(stats_json['streams']) > 0
+    first_stream_obj = stats_json['streams'][0]
+    assert isinstance(first_stream_obj, dict)
+    assert {'mdt', 'length', 'age_seconds', 'newest_entry_age_seconds'}.issubset(first_stream_obj.keys())
+
+    # 6. Validate the structure of the 'breakdown' list.
+    assert isinstance(stats_json['breakdown'], list)
+    assert len(stats_json['breakdown']) > 0
+    first_breakdown_obj = stats_json['breakdown'][0]
+    assert isinstance(first_breakdown_obj, dict)
+    assert set(first_breakdown_obj.keys()) == {'mdt', 'action', 'status', 'count'}
+
+def test_tail_tool_output_and_filtering(capsys):
+    """
+    Tests the hsm-stream-tail tool's output formatting and filtering logic
+    by mocking the event stream and the 'lfs' command.
+    """
+    # 1. Define mock events that our fake stream will yield.
+    started_event = StreamEvent(
+        stream='hsm:actions:test-MDT0000',
+        id='1-0',
+        data={
+            "event_type": "UPDATE", "action": "ARCHIVE", "status": "STARTED",
+            "mdt": "test-MDT0000", "fid": "[0xa:0xb:0xc]", "timestamp": 1700000000
+        }
+    )
+    purged_event = StreamEvent(
+        stream='hsm:actions:test-MDT0000',
+        id='1-1',
+        data={
+            "event_type": "PURGED", "mdt": "test-MDT0000", "cat_idx": 1, "rec_idx": 1,
+            "timestamp": 1700000001
+        }
+    )
+
+    # 2. Use patch to mock both the event source and the external 'lfs' command.
+    with patch('lustre_hsm_action_stream.consumer.StreamReader.events') as mock_events, \
+         patch('subprocess.run') as mock_subprocess:
+
+        # --- Test A: Basic formatting and FID resolution ---
+        print("\n--- Testing Tail (Basic Formatting) ---")
+        mock_events.return_value = [started_event]
+        mock_subprocess.return_value = MagicMock(
+            returncode=0, stdout="/lustre/mock/path/to/file.dat\n"
+        )
+
+        # We call main() directly after mocking sys.argv to avoid the run_cli helper
+        with patch.object(sys, 'argv', ['hsm-stream-tail', '--mountpoint', '/lustre']):
+            try:
+                tail_main()
+            except SystemExit: # The main function calls sys.exit(0) at the end
+                pass
+
+        captured = capsys.readouterr()
+        # Assert that the output contains all the expected formatted parts
+        assert "ARCHIVE" in captured.out
+        assert "STARTED" in captured.out
+        assert "/lustre/mock/path/to/file.dat" in captured.out
+        assert "(id: 1-0)" in captured.out
+
+        # --- Test B: Default filtering (should hide PURGED) ---
+        print("\n--- Testing Tail (Default Filtering) ---")
+        mock_events.return_value = [started_event, purged_event]
+        with patch.object(sys, 'argv', ['hsm-stream-tail', '--mountpoint', '/lustre']):
+            try: tail_main()
+            except SystemExit: pass
+
+        captured = capsys.readouterr()
+        assert "ARCHIVE" in captured.out  # The STARTED event should be visible
+        assert "PURGED" not in captured.out # The PURGED event should be hidden by default
+
+        # --- Test C: Using --show to override default filter ---
+        print("\n--- Testing Tail (--show PURGED) ---")
+        mock_events.return_value = [started_event, purged_event]
+        with patch.object(sys, 'argv', ['hsm-stream-tail', '--mountpoint', '/lustre', '--show', 'PURGED']):
+            try: tail_main()
+            except SystemExit: pass
+
+        captured = capsys.readouterr()
+        assert "ARCHIVE" in captured.out # STARTED is still visible
+        assert "PURGED" in captured.out  # PURGED is now also visible

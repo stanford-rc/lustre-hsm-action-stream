@@ -108,14 +108,19 @@ class StatsGenerator:
 
         # --- Get stream health metrics (requires a separate, direct Redis connection) ---
         health_metrics = {}
+        streams_list = []
         if reader.streams:
             try:
                 direct_r = redis.Redis(host=self.conf['redis_host'], port=self.conf['redis_port'], db=self.conf['redis_db'])
                 health_metrics = self._get_stream_health_metrics(direct_r, reader.streams)
+                # Convert the dictionary of streams into a list of objects
+                for stream_name, metrics in health_metrics.get('streams', {}).items():
+                    mdt_name = stream_name.split(':')[-1]
+                    streams_list.append({"mdt": mdt_name, **metrics})
             except Exception as e:
                 logging.error(f"Could not connect to Redis for health metrics: {e}")
 
-        # --- Calculate summary metrics ---
+        # --- Calculate summary and breakdown metrics ---
         breakdown_counter = Counter((v.get('mdt'), v.get('action'), v.get('status')) for v in self.live_actions.values())
         breakdown_list = [{"mdt": m or 'N/A', "action": a or 'N/A', "status": s or 'N/A', "count": c} 
                           for (m, a, s), c in sorted(breakdown_counter.items())]
@@ -131,10 +136,14 @@ class StatsGenerator:
             "total_live_actions": len(self.live_actions),
             "oldest_live_action_age_seconds": oldest_live_action_age_seconds,
             "total_events_replayed": self.events_processed,
-            **health_metrics
+            "total_stream_entries": health_metrics.get('total_stream_entries', 0)
         }
-
-        final_output = {"summary": summary_metrics, "breakdown": breakdown_list}
+        # --- Assemble the final top-level JSON object ---
+        final_output = {
+            "summary": summary_metrics,
+            "streams": streams_list,
+            "breakdown": breakdown_list
+        }
         json.dump(final_output, sys.stdout, indent=2)
 
 
