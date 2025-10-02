@@ -1,5 +1,6 @@
 # Lustre HSM Action Stream
 
+[![Lustre HSM Action Stream CI](https://github.com/stanford-rc/lustre-hsm-action-stream/actions/workflows/ci.yml/badge.svg)](https://github.com/stanford-rc/lustre-hsm-action-stream/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
 A high-performance, scalable, and operationally simple toolkit for creating a real-time event stream from Lustre's Hierarchical Storage Management (HSM) actions.
