@@ -1,8 +1,8 @@
 #
-# Configuration for the hsm-action-shipper service.
+# Configuration for the Lustre HSM Action Shipper
 #
 
-# --- 1. Redis Connection (REQUIRED) ---
+# --- 1. Redis Connection ---
 # You MUST edit 'redis_host' to point to your Redis server.
 redis_host: "localhost"
 redis_port: 6379
@@ -14,32 +14,39 @@ redis_db: 1
 
 # The PREFIX for the Redis Streams. The shipper will append the MDT name
 # to this prefix to create a stream per MDT.
-# Example: hsm:actions:elm-MDT0000, hsm:actions:elm-MDT0001, etc.
+# Example: hsm:actions:lustre-MDT0000, hsm:actions:lustre-MDT0001, etc.
 redis_stream_prefix: "hsm:actions"
 
-# --- 2. Filesystem Polling ---
+# --- 2. Action File Polling ---
+# Glob pattern to find Lustre HSM action files.
 # This default glob will automatically find any Lustre filesystem on the MDS.
-mdt_watch_glob: "/sys/kernel/debug/lustre/mdt/*-MDT*/hsm/actions"
+mdt_watch_glob: "/sys/kernel/debug/lustre/mdt/*-MDT????/hsm/actions"
 
 # How often to poll the actions files, in seconds. This should be less
 # than half of the 'hsm/grace_delay' setting in Lustre (default 60s).
-poll_interval: 20
+poll_interval: 20.0
 
 # --- 3. Maintenance and Trimming ---
-# How often the shipper should run its internal maintenance task. This task
-# validates stream consistency and trims old events.
+# How often (in seconds) the shipper should run its internal maintenance task.
 reconcile_interval: 21600 # 6 hours
 
-# Redis limits how many entries can be trimmed at once (usually up to 10k).
-# This can be problematic for large backlogs.
-# If the maintenance task trims more than aggressive_trim_threshold entries
-# from a stream in one pass, it will immediately run the trim operation again
-# or that stream to efficiently clear large backlogs.
-aggressive_trim_threshold: 5000
+# When trimming large backlogs of historical events, the operation is done
+# in chunks to avoid blocking Redis. This sets the size of each chunk.
+trim_chunk_size: 1000
+
+# Use Redis's approximate trimming (~). This is faster but may require
+# multiple passes to trim everything older than the target ID.
+# Recommended: true (for production), false (for deterministic testing).
+use_approximate_trimming: true
+
 
 # --- 4. Cache and Logging ---
-# The file to store the shipper's persistent action cache.
+# Path to a file where the shipper will cache the last seen state of action files.
+# This prevents re-shipping events on restart.
 cache_path: "/var/cache/hsm-action-shipper/cache.json"
 
-# Log level can be DEBUG, INFO, WARNING, ERROR, CRITICAL.
+# Log level. Can be DEBUG, INFO, WARNING, ERROR, CRITICAL.
 log_level: "INFO"
+
+# Path to the log file. If commented out, logs to standard output.
+# log_file: "/var/log/hsm_action_shipper.log"

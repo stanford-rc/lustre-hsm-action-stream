@@ -46,7 +46,8 @@ redis_stream_prefix: "hsm:actions"
 mdt_watch_glob: "{actions_file}"
 poll_interval: 1
 reconcile_interval: 3 # Short interval for testing
-aggressive_trim_threshold: 5000
+trim_chunk_size: 1000 # Use new key name
+use_approximate_trimming: false # Use exact trimming for predictable tests
 cache_path: "{tmp_path}/shipper_cache.json"
 log_level: "DEBUG"
 """)
@@ -73,8 +74,11 @@ def run_cli():
     """Returns a helper function to run a main function from one of the tools."""
     def _run_cli_wrapper(main_func, *args):
         final_args = list(args)
-        if main_func == shipper_main and '--reconcile-now' not in final_args:
-            final_args.append('--run-once')
+        if main_func != shipper_main and '--run-once' not in final_args:
+            # Check if the tool supports --run-once before adding it
+            if main_func.__name__ in ['viewer_main', 'tail_main', 'stats_main']:
+                 # Some tools might not have it, let's assume these do for now
+                 pass # The logic is now inside the tests themselves
 
         with patch.object(sys, 'argv', [main_func.__module__] + final_args):
             try:

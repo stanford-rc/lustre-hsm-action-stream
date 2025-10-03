@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "lustre-hsm-action-stream"
-version = "0.2.0"
-description = "A toolkit for shipping and reconciling Lustre HSM action events."
+version = "0.3.0"
+description = "A toolkit for shipping Lustre HSM action events."
 readme = "README.md"
 requires-python = ">=3.9"
 license = { file = "LICENSE" }
@@ -29,7 +29,6 @@ Homepage = "https://github.com/stanford-rc/lustre-hsm-action-stream"
 # This replaces the '[options.entry_points]' section from setup.cfg
 [project.scripts]
 hsm-action-shipper = "lustre_hsm_action_stream.shipper:main"
-hsm-stream-reconciler = "lustre_hsm_action_stream.reconciler:main"
 hsm-action-top = "lustre_hsm_action_stream.viewer:main"
 hsm-stream-stats = "lustre_hsm_action_stream.stats:main"
 hsm-stream-tail = "lustre_hsm_action_stream.tail:main"

@@ -80,7 +80,7 @@ def resolve_fid_to_path(mountpoint, fid, fid_cache):
 
 # --- Main Application Logic ---
 
-def tail_events(conf, from_beginning, hidden_items):
+def tail_events(conf, from_beginning, hidden_items, run_once=False):
     """
     Connects to Redis via StreamReader and continuously prints formatted events.
     """
@@ -92,6 +92,10 @@ def tail_events(conf, from_beginning, hidden_items):
         prefix=conf['redis_stream_prefix']
     )
 
+    # For run-once mode, we need to know when historical replay is done.
+    # A short block_ms allows the generator to yield None at the end of the stream.
+    block_duration = 200 if run_once else 0 # 0 means block forever
+
     # Print a user-friendly startup message to stderr, as stdout is for event data.
     print(f"Tailing streams with prefix '{conf['redis_stream_prefix']}:*'. Press Ctrl+C to exit.", file=sys.stderr)
     # Log the same info for consistency, which respects the chosen log level.
@@ -100,8 +104,13 @@ def tail_events(conf, from_beginning, hidden_items):
 
     try:
         # The main loop is now a simple, elegant for-loop over the event generator.
-        for event in reader.events(from_beginning=from_beginning, block_ms=0):
-            if not event: continue
+        for event in reader.events(from_beginning=from_beginning, block_ms=block_duration):
+            if not event:
+                # If we are in run_once mode and get a None event, it means we're done.
+                if run_once:
+                    break
+                else:
+                    continue # In follow mode, just keep blocking for the next one.
 
             # `event` is a StreamEvent namedtuple(stream, id, data)
             e_data = event.data
@@ -154,6 +163,7 @@ def main():
     config_group.add_argument('--from-beginning', action='store_true', help="Start tailing from the beginning of all streams.")
     config_group.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], help="Set the logging level for stderr output.")
     config_group.add_argument("--log-file", help="Redirect logging output to a file instead of stderr.")
+    config_group.add_argument("--run-once", action="store_true", help="Process all available events and then exit.")
 
     filter_group = parser.add_argument_group('Filtering Options', 'Modify the default view (which hides PURGED).')
     filter_group.add_argument('--show', nargs='+', metavar='ITEM', help="Show specific action/status types hidden by default (e.g., --show PURGED).")
@@ -191,7 +201,7 @@ def main():
 
     signal.signal(signal.SIGTERM, lambda s, f: sys.exit(0))
 
-    tail_events(conf, args.from_beginning, hidden_items)
+    tail_events(conf, args.from_beginning, hidden_items, args.run_once)
     sys.exit(0)
 
 if __name__ == "__main__":

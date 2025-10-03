@@ -1,7 +1,7 @@
 %global project_name lustre-hsm-action-stream
 
 Name:           python-%{project_name}
-Version:        0.2.0
+Version:        0.3.0
 Release:        1%{?dist}
 Summary:        A toolkit for shipping Lustre HSM action events to Redis streams
 
@@ -39,9 +39,8 @@ HSM events from MDT hsm/actions logs to dedicated, per-MDT Redis streams.
 
 # --- Manually adjust install locations for system binaries ---
 install -d -m 755 %{buildroot}%{_sbindir}
-# The shipper and reconciler are considered system-level tools.
+# The shipper is considered a system-level tool.
 mv %{buildroot}%{_bindir}/hsm-action-shipper %{buildroot}%{_sbindir}/
-mv %{buildroot}%{_bindir}/hsm-stream-reconciler %{buildroot}%{_sbindir}/
 
 # --- Manual installation of non-Python files ---
 install -d -m 755 %{buildroot}%{_sysconfdir}/%{project_name}
@@ -79,7 +78,6 @@ install -d -m 750 %{buildroot}/var/cache/hsm-action-shipper
 # --- Binaries ---
 # System binaries in /usr/sbin
 %{_sbindir}/hsm-action-shipper
-%{_sbindir}/hsm-stream-reconciler
 
 # User binaries in /usr/bin
 %{_bindir}/hsm-action-top
@@ -97,6 +95,14 @@ install -d -m 750 %{buildroot}/var/cache/hsm-action-shipper
 %dir /var/cache/hsm-action-shipper
 
 %changelog
+* Sat Oct  4 2025 Stephane Thiell <sthiell@stanford.edu> - 0.3.0-1
+- Major overhaul of shipper and maintenance logic for improved robustness.
+- Replaced volatile event keys with a stable `action_key` ([fid]:[action]).
+- Implemented transactional shipping to prevent event loss on Redis errors.
+- Added high-performance chunked and approximate stream trimming.
+- Added `--run-once` flag to `hsm-action-top` and `hsm-stream-tail`.
+- Removed standalone `hsm-stream-reconciler` tool.
+
 * Wed Oct  1 2025 Stephane Thiell <sthiell@stanford.edu> - 0.2.0-1
 - Replaced global stream with per-MDT streams.
 - Removed hsm-stream-janitor daemon.
