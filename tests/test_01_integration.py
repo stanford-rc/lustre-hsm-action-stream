@@ -9,7 +9,6 @@ from unittest.mock import patch, MagicMock
 from lustre_hsm_action_stream.shipper import main as shipper_main
 from lustre_hsm_action_stream.stats import main as stats_main
 from lustre_hsm_action_stream.viewer import main as viewer_main, HSMStateTracker
-from lustre_hsm_action_stream.reconciler import main as reconciler_main
 from lustre_hsm_action_stream.tail import main as tail_main
 from lustre_hsm_action_stream.consumer import StreamEvent, StreamReader
 import redis
@@ -35,20 +34,47 @@ def test_shipper_new_update_purge(test_env, redis_conn_params, run_cli):
     assert r.xlen(stream_name) == 5
 
 def test_shipper_reconciler_self_healing(test_env, redis_conn_params, run_cli):
-    actions_file, config_file, stream_name = test_env["actions_file"], test_env["shipper_config"], test_env["stream_name"]
+    """
+    Tests the shipper's integrated maintenance logic can self-heal the stream.
+    This simulates an 'orphan' event in Redis that does not exist on disk
+    and verifies that the maintenance cycle correctly purges it and cleans up.
+    """
+    # 1. Setup the environment from fixtures
+    actions_file = test_env["actions_file"]
+    config_file = test_env["shipper_config"]
+    stream_name = test_env["stream_name"]
+    mdt_name = test_env["mdt_name"]
+
     r = redis.Redis(**redis_conn_params, decode_responses=True)
+
+    # 2. Manually create an inconsistent state: an "orphan" event in Redis
+    # that has no corresponding entry in the Lustre actions file.
     orphan_event = {
-        "event_type": "NEW", "mdt": test_env["mdt_name"], "cat_idx": 99, "rec_idx": 99,
-        "action": "ORPHANED", "status": "STARTED", "fid": "[0xdeadbeef]",
+        "event_type": "NEW",
+        "mdt": mdt_name,
+        "cat_idx": 99,
+        "rec_idx": 99,
+        "action": "ORPHANED",
+        "status": "STARTED",
+        "fid": "[0xdeadbeef]",
         "action_key": "[0xdeadbeef]:ORPHANED"
     }
     r.xadd(stream_name, {"data": json.dumps(orphan_event)})
-    assert r.xlen(stream_name) == 1
+    assert r.xlen(stream_name) == 1, "Orphan event should be in the stream initially"
+
+    # 3. Ensure the "ground truth" (the actions file) is empty.
     actions_file.write_text("")
+
+    # 4. Run the shipper with a special flag that triggers the maintenance cycle immediately.
+    # Note: A real daemon would do this automatically every `reconcile_interval`.
     run_cli(shipper_main, '-c', str(config_file), '--maintenance-now')
-    # The reconciler now injects a valid PURGED event (with a constructed action_key)
-    # The replayer finds this purge, resulting in 0 live actions, and the trim succeeds.
-    assert r.xlen(stream_name) == 0
+
+    # 5. Verify the outcome. The maintenance cycle should:
+    #    a) Detect the orphan.
+    #    b) Inject a corrective 'PURGED' event.
+    #    c) Realize there are no more live actions.
+    #    d) Trim the entire stream (maxlen=0), resulting in an empty stream.
+    assert r.xlen(stream_name) == 0, "Stream should be empty after self-healing and full trim"
 
 def test_stats_tool(test_env, capsys, run_cli):
     actions_file, shipper_config, stats_config = test_env["actions_file"], test_env["shipper_config"], test_env["stats_config"]
@@ -87,28 +113,6 @@ def test_viewer_cli_smoke_test(test_env, capsys, redis_conn_params, run_cli):
     )
     captured = capsys.readouterr()
     assert "Live Actions: 1" in captured.out
-
-def test_reconciler_tool(test_env, capsys, redis_conn_params, run_cli):
-    actions_file, shipper_config = test_env["actions_file"], test_env["shipper_config"]
-    actions_file.write_text(VALID_LINE_1)
-    run_cli(shipper_main, '-c', str(shipper_config), '--run-once')
-    run_cli(
-        reconciler_main,
-        '--glob', str(actions_file), '--stream-prefix', 'hsm:actions',
-        '--host', redis_conn_params['host'], '--port', str(redis_conn_params['port']), '--db', str(redis_conn_params['db'])
-    )
-    captured = capsys.readouterr()
-    assert "SUCCESS: Validation complete" in captured.out
-    actions_file.write_text("")
-    with pytest.raises(SystemExit) as e:
-        run_cli(
-            reconciler_main,
-            '--glob', str(actions_file), '--stream-prefix', 'hsm:actions',
-            '--host', redis_conn_params['host'], '--port', str(redis_conn_params['port']), '--db', str(redis_conn_params['db'])
-        )
-    assert e.value.code == 1
-    captured_fail = capsys.readouterr()
-    assert "FAILURE: Critical discrepancies found" in captured_fail.out
 
 def test_stats_tool_output_structure(test_env, capsys, run_cli):
     actions_file, shipper_config, stats_config = test_env["actions_file"], test_env["shipper_config"], test_env["stats_config"]
