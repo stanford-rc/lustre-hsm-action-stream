@@ -141,6 +141,7 @@ class StreamReader:
         self.discover_streams()
 
         last_ids = {stream: '0-0' if from_beginning else '$' for stream in self.streams}
+        logging.debug(f"Starting XREAD with initial IDs: {last_ids}")
 
         while True:
             try:
@@ -165,6 +166,7 @@ class StreamReader:
                 effective_block_ms = block_ms if block_ms > 0 else 5000
 
                 response = self.redis_client.xread(last_ids, count=100, block=effective_block_ms)
+                logging.debug(f"Raw Redis Response: {response}")
 
                 if not response:
                     # If we timed out, yield None only if the caller expects it (block_ms > 0)
