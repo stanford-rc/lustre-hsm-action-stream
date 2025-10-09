@@ -406,12 +406,28 @@ def _trim_stream(conf, mdt, live_action_ids, r):
     try:
         chunk_size = conf.get('trim_chunk_size', 1000)
         total_deleted = 0
+        loop_count = 0
+        WARN_AFTER_LOOPS = 100
+
         while not SHUTDOWN_EVENT.is_set():
+            loop_count += 1
             deleted_count = r.xtrim(stream_name, minid=oldest_live_id, limit=chunk_size, approximate=approximate)
-            total_deleted += deleted_count
-            if deleted_count < chunk_size:
+
+            # Defensive check for unexpected return values from the client library.
+            if not isinstance(deleted_count, int) or deleted_count < 0:
+                logging.error(f"[Maintenance] CRITICAL: XTRIM returned an invalid value: {deleted_count}. Stopping trim for {stream_name}.")
                 break
-            logging.info(f"[Maintenance] Trimmed a full chunk of {deleted_count:,} from '{stream_name}'. Re-trimming...")
+
+            # The only safe exit condition is when Redis reports it deleted 0 entries.
+            if deleted_count == 0:
+                break
+
+            total_deleted += deleted_count
+            logging.debug(f"[Maintenance] Trimmed a chunk of {deleted_count:,} from '{stream_name}'. Re-trimming...")
+
+            if loop_count == WARN_AFTER_LOOPS:
+                logging.warning(f"[Maintenance] Partial trim for '{stream_name}' has run {loop_count} times, indicating a very large backlog is being processed.")
+
         if total_deleted > 0:
             logging.info(f"[Maintenance] Garbage collection for '{stream_name}' complete. Total entries removed: {total_deleted:,}.")
         else:
@@ -446,11 +462,36 @@ def run_maintenance_cycle(conf, ground_truth_snapshot, locally_managed_mdts, red
 
             # If, after reconciliation, no actions are considered live, it's safe to trim everything.
             if not live_action_ids:
-                logging.info(f"[Maintenance] No live actions remain for '{stream_name}' after reconciliation. Clearing all stream history.")
+                logging.info(f"[Maintenance] No live actions remain for '{stream_name}' after reconciliation. Clearing all stream history...")
                 try:
-                    deleted_count = r.xtrim(stream_name, maxlen=0)
-                    if deleted_count > 0:
-                        logging.info(f"[Maintenance] Trimmed all {deleted_count:,} entries from '{stream_name}'.")
+                    chunk_size = conf.get('trim_chunk_size', 1000)
+                    total_deleted = 0
+                    loop_count = 0
+                    WARN_AFTER_LOOPS = 100
+
+                    while not SHUTDOWN_EVENT.is_set():
+                        loop_count += 1
+                        deleted_count = r.xtrim(stream_name, maxlen=0, limit=chunk_size)
+
+                        # Defensive check for unexpected return values.
+                        if not isinstance(deleted_count, int) or deleted_count < 0:
+                            logging.error(f"[Maintenance] CRITICAL: XTRIM (maxlen=0) returned an invalid value: {deleted_count}. Stopping trim for {stream_name}.")
+                            break
+
+                        # The only safe exit condition is when Redis returns 0.
+                        if deleted_count == 0:
+                            break
+
+                        total_deleted += deleted_count
+                        logging.debug(f"[Maintenance] Trimmed a chunk of {deleted_count:,} from '{stream_name}'. Re-trimming...")
+
+                        if loop_count == WARN_AFTER_LOOPS:
+                            logging.warning(f"[Maintenance] Full trim for '{stream_name}' has run {loop_count} times, indicating a very large backlog is being cleared.")
+
+                    if total_deleted > 0:
+                        logging.info(f"[Maintenance] Full garbage collection for '{stream_name}' complete. Total entries removed: {total_deleted:,}.")
+                    else:
+                        logging.info(f"[Maintenance] Stream '{stream_name}' was already empty or cleared in a prior pass. No aggressive GC needed.")
                 except Exception as e:
                     logging.error(f"[Maintenance] Error during full stream trim for {mdt}: {e}")
             else:
