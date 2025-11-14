@@ -1,0 +1,32 @@
+[Unit]
+Description=Lustre HSM Restore-Ahead Client Daemon
+# You might want to add a dependency on lustre-client here
+After=network-online.target
+
+[Service]
+# IMPORTANT: Replace the placeholder paths below with your actual paths.
+
+# The command to run the script.
+# Assumes the script, config, and cache are in different locations.
+ExecStart=/usr/bin/python3 /usr/local/bin/lrestore_ahead_client.py \
+  --config /etc/lrestore-ahead-client/config.yaml \
+  --cache-db /var/lib/lrestore-ahead-client/cache.db
+
+# The script's working directory.
+WorkingDirectory=/usr/local/bin
+
+# Root privileges are required for commands like 'lfs fid2path' and 'lfs hsm_state'
+# to correctly query the state of files across the entire filesystem.
+User=root
+Group=root
+
+# Ensure logs appear in the journal immediately.
+Environment=PYTHONUNBUFFERED=1
+
+# Automatically restart the service if it fails.
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+

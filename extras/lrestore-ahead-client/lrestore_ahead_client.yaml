@@ -1,0 +1,94 @@
+# Configuration for the Lustre HSM Restore-Ahead Client
+
+# --- Filesystem and API ---
+fsname: "lustre"
+fs_mountpoint: "/lustre"
+api_host: "0.0.0.0"
+api_port: 5003
+
+# --- Redis Connection for HSM Action Stream ---
+redis_host: "localhost"
+redis_port: 6379
+redis_db: 1
+redis_stream_prefix: "hsm:actions"
+
+# --- Restore Logic Section ---
+restore_logic:
+  # A regular expression to identify files for restore-ahead.
+  restore_regex: "^part\\..*"
+  # The Lustre archive ID that files must belong to in order to be restored.
+  target_archive_id: 1
+
+# --- Restore Pacing/Throttling ---
+# Controls the behavior of restoring large sets of files to avoid overwhelming
+# the HSM backend (e.g., tape drives).
+pacing:
+  # To ensure ALL restore-ahead jobs are paced, set this to 1.
+  # This means any directory with 2 or more files will be paced.
+  activation_threshold: 100
+
+  # Concurrency limit for ALL ahead-restore jobs.
+  batch_size: 100
+
+  # The Pacing Worker thread will check the status of active jobs this often (seconds).
+  check_interval: 30
+
+  # When the number of in-flight restores for a job drops below this
+  # threshold, the worker will queue the next batch.
+  # CRITICAL: 'resume_threshold' MUST be less than 'batch_size' to prevent
+  # a deadlock where the pacer stops queueing new files.
+  resume_threshold: 20
+
+  # Safety net: If a pacing job is active for longer than this many seconds,
+  # it will be considered stale/stuck and will be automatically deleted.
+  job_timeout: 86400 # 24 hours
+
+# --- Caching, State, and Cleanup ---
+# Governs the behavior of the in-memory and persistent on-disk (SQLite) caches.
+
+# The interval (in seconds) for the cleanup thread to purge old database entries.
+# BEST PRACTICE: This should be on a similar order of magnitude as dir_cache_ttl
+# to prevent the database file from growing with expired data.
+db_cleanup_interval: 3600 # 1 hour
+
+# The Time-To-Live (in seconds) for the persistent directory cache.
+# BEST PRACTICE: 'dir_cache_ttl' should be greater than or equal to 'file_cache_ttl'
+# to prevent performing expensive directory scans that result in no action.
+dir_cache_ttl: 21600 # 6 hours
+
+# The Time-To-Live (in seconds) for the persistent file cache.
+# A file path will not be queued for restore more than once in this duration.
+file_cache_ttl: 600 # 10 minutes
+
+# Configuration for the fast, in-memory cache used for FID-to-path resolution.
+cache:
+  fid_path_cache_size: 50000
+  fid_path_cache_ttl: 3600 # 1 hour
+
+# --- Command Limits and Timeouts ---
+timeouts:
+  fid2path: 10
+  path2fid: 10
+  hsm_restore: 10
+  hsm_state: 10
+limits:
+  max_files_in_dir_scan: 100000
+
+# --- Optional Slack Notifications ---
+slack_notifications:
+  # Set to true to enable Slack notifications for new restore-ahead jobs.
+  enabled: false
+
+  # Slack incoming webhook URL to use.
+  webhook_url: "https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
+
+  # The channel or user to notify. Use #channel-name or @username.
+  channel: "#general"
+
+  # Customize the bot's appearance (optional).
+  bot_username: "Restore-Ahead Daemon"
+  bot_emoji: ":rocket:"
+
+  # Example of a path prefix to obfuscate in notifications.
+  # Any path starting with this will have its path replaced with its FID.
+  pii_path_prefix: "/lustre/project/sensitive-data"
